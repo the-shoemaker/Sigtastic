@@ -19,23 +19,10 @@ export type TaskVariant =
 
 export type ContextBadgeKind =
   | "content"
-  | "task-user"
-  | "task-service"
-  | "task-manual"
-  | "task-script"
-  | "task-send"
-  | "task-receive"
-  | "task-business-rule"
-  | "task-call-activity"
-  | "task-automatic"
+  | "multi-element"
   | "timer"
   | "message"
-  | "signal"
-  | "error"
-  | "escalation"
   | "conditional"
-  | "compensation"
-  | "terminate"
   | "link"
   | "multiple"
   | "loop"
@@ -44,6 +31,8 @@ export type ContextBadgeKind =
   | "adhoc"
   | "non-interrupting"
   | "transaction";
+
+export type TypeBadgeKind = Exclude<TaskVariant, "default">;
 
 export type PrimaryShapeInfo = {
   stencilId: string;
@@ -365,8 +354,33 @@ const inferTaskVariant = (stencilIdRaw: string, properties: UnknownRecord | null
   return "default";
 };
 
-const getTypeName = (stencilIdRaw: string, taskVariant: TaskVariant): string => {
+const getEventFlavorName = (aggregate: string): string => {
+  if (containsAny(aggregate, ["timer"])) return "Timer";
+  if (containsAny(aggregate, ["message"])) return "Message";
+  if (containsAny(aggregate, ["signal"])) return "Signal";
+  if (containsAny(aggregate, ["conditional"])) return "Conditional";
+  if (containsAny(aggregate, ["linkevent", " link "])) return "Link";
+  if (containsAny(aggregate, ["multiple"])) return "Multiple";
+  if (containsAny(aggregate, ["escalation"])) return "Escalation";
+  if (containsAny(aggregate, ["error"])) return "Error";
+  if (containsAny(aggregate, ["compensation"])) return "Compensation";
+  if (containsAny(aggregate, ["terminate"])) return "Terminate";
+  if (containsAny(aggregate, ["cancel"])) return "Cancel";
+  return "";
+};
+
+const getTypeName = (
+  stencilIdRaw: string,
+  taskVariant: TaskVariant,
+  properties: UnknownRecord | null,
+): string => {
   const stencilId = stencilIdRaw.toLowerCase();
+  const propertyStrings = Object.values(properties ?? {})
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  const aggregate = `${stencilId} ${propertyStrings}`;
+  const eventFlavor = getEventFlavorName(aggregate);
 
   if (stencilId.includes("transaction")) return "Transaction";
   if (stencilId.includes("subprocess")) return "Subprocess";
@@ -375,10 +389,18 @@ const getTypeName = (stencilIdRaw: string, taskVariant: TaskVariant): string => 
   if (stencilId.includes("eventbasedgateway")) return "Event-Based Gateway";
   if (stencilId.includes("complexgateway")) return "Complex Gateway";
   if (stencilId.includes("gateway")) return "Exclusive Gateway";
-  if (stencilId.includes("startevent")) return "Start Event";
-  if (stencilId.includes("endevent")) return "End Event";
-  if (stencilId.includes("boundaryevent")) return "Boundary Event";
-  if (stencilId.includes("event")) return "Intermediate Event";
+  if (stencilId.includes("startevent")) {
+    return eventFlavor ? `Start ${eventFlavor} Event` : "Start Event";
+  }
+  if (stencilId.includes("endevent")) {
+    return eventFlavor ? `End ${eventFlavor} Event` : "End Event";
+  }
+  if (stencilId.includes("boundaryevent")) {
+    return eventFlavor ? `Boundary ${eventFlavor} Event` : "Boundary Event";
+  }
+  if (stencilId.includes("intermediate") || stencilId.includes("event")) {
+    return eventFlavor ? `Intermediate ${eventFlavor} Event` : "Intermediate Event";
+  }
   if (stencilId.includes("messageflow")) return "Message Flow";
   if (stencilId.includes("sequenceflow")) return "Sequence Flow";
   if (stencilId.includes("association")) return "Association";
@@ -427,6 +449,41 @@ const uniqueBadges = (badges: ContextBadgeKind[]): ContextBadgeKind[] => {
   return result;
 };
 
+const getTopLevelNodeCount = (payload: unknown): number => {
+  const childShapes = getChildShapeArray(payload).filter(isRecord);
+  let count = 0;
+
+  for (const shape of childShapes) {
+    if (!isEdgeStencil(getStencilId(shape))) {
+      count += 1;
+    }
+  }
+
+  return count;
+};
+
+export function getTopLevelNonEdgeStencils(
+  payload: unknown,
+  max = 3,
+): string[] {
+  const childShapes = getChildShapeArray(payload).filter(isRecord);
+  const stencils: string[] = [];
+
+  for (const shape of childShapes) {
+    const stencilId = getStencilId(shape);
+    if (!stencilId || isEdgeStencil(stencilId)) {
+      continue;
+    }
+
+    stencils.push(stencilId);
+    if (stencils.length >= max) {
+      break;
+    }
+  }
+
+  return stencils;
+}
+
 export function getPrimaryShapeInfo(payload: unknown): PrimaryShapeInfo {
   const primaryShape = getPrimaryShape(payload);
   const stencilId = getStencilId(primaryShape);
@@ -434,7 +491,7 @@ export function getPrimaryShapeInfo(payload: unknown): PrimaryShapeInfo {
   const contentText = extractContentText(properties);
   const hasContent = contentText.length > 0;
   const taskVariant = inferTaskVariant(stencilId, properties);
-  const typeName = getTypeName(stencilId, taskVariant);
+  const typeName = getTypeName(stencilId, taskVariant, properties);
 
   return {
     stencilId,
@@ -464,24 +521,13 @@ export function getContextBadgeKinds(payload: unknown): ContextBadgeKind[] {
     badges.push("content");
   }
 
-  if (info.taskVariant === "user") badges.push("task-user");
-  if (info.taskVariant === "service") badges.push("task-service");
-  if (info.taskVariant === "manual") badges.push("task-manual");
-  if (info.taskVariant === "script") badges.push("task-script");
-  if (info.taskVariant === "send") badges.push("task-send");
-  if (info.taskVariant === "receive") badges.push("task-receive");
-  if (info.taskVariant === "business-rule") badges.push("task-business-rule");
-  if (info.taskVariant === "call-activity") badges.push("task-call-activity");
-  if (info.taskVariant === "automatic") badges.push("task-automatic");
+  if (getTopLevelNodeCount(payload) > 1) {
+    badges.push("multi-element");
+  }
 
   if (containsAny(aggregate, ["timer"])) badges.push("timer");
   if (containsAny(aggregate, ["message"])) badges.push("message");
-  if (containsAny(aggregate, ["signal"])) badges.push("signal");
-  if (containsAny(aggregate, ["error"])) badges.push("error");
-  if (containsAny(aggregate, ["escalation"])) badges.push("escalation");
   if (containsAny(aggregate, ["conditional"])) badges.push("conditional");
-  if (containsAny(aggregate, ["compensation"])) badges.push("compensation");
-  if (containsAny(aggregate, ["terminate"])) badges.push("terminate");
   if (containsAny(aggregate, ["linkevent", " link "])) badges.push("link");
   if (containsAny(aggregate, ["multiple"])) badges.push("multiple");
 
@@ -506,19 +552,164 @@ export function getContextBadgeKinds(payload: unknown): ContextBadgeKind[] {
   return uniqueBadges(badges);
 }
 
+export function getTypeBadgeKind(payload: unknown): TypeBadgeKind | null {
+  const variant = getPrimaryShapeInfo(payload).taskVariant;
+  return variant === "default" ? null : variant;
+}
+
+const collectShapeCandidates = (
+  value: unknown,
+  out: UnknownRecord[],
+  visited: WeakSet<object>,
+): void => {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectShapeCandidates(item, out, visited);
+    }
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  if (visited.has(value)) {
+    return;
+  }
+  visited.add(value);
+
+  if (typeof value.resourceId === "string" && isRecord(value.stencil) && typeof value.stencil.id === "string") {
+    out.push(value);
+  }
+
+  for (const nested of Object.values(value)) {
+    collectShapeCandidates(nested, out, visited);
+  }
+};
+
+const hasReferenceToAnyId = (
+  value: unknown,
+  ids: Set<string>,
+  visited: WeakSet<object>,
+): boolean => {
+  if (typeof value === "string") {
+    return ids.has(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasReferenceToAnyId(entry, ids, visited));
+  }
+
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  if (visited.has(value)) {
+    return false;
+  }
+  visited.add(value);
+
+  for (const nested of Object.values(value)) {
+    if (hasReferenceToAnyId(nested, ids, visited)) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const appendLinkedAnnotationsAndConnectors = (payload: UnknownRecord): void => {
+  if (!Array.isArray(payload.childShapes) || !isRecord(payload.linked)) {
+    return;
+  }
+
+  const currentShapes = payload.childShapes.filter(isRecord);
+  const existingIds = collectResourceIds(currentShapes);
+
+  const linkedCandidates: UnknownRecord[] = [];
+  collectShapeCandidates(payload.linked, linkedCandidates, new WeakSet<object>());
+
+  if (linkedCandidates.length === 0) {
+    return;
+  }
+
+  const annotationCandidates = linkedCandidates.filter((shape) =>
+    getStencilId(shape).toLowerCase().includes("annotation"),
+  );
+  const annotationIds = new Set<string>();
+  for (const shape of annotationCandidates) {
+    if (typeof shape.resourceId === "string" && shape.resourceId.trim()) {
+      annotationIds.add(shape.resourceId);
+    }
+  }
+
+  const associationCandidates = linkedCandidates.filter((shape) =>
+    getStencilId(shape).toLowerCase().includes("association"),
+  );
+
+  const toAppend: UnknownRecord[] = [];
+  for (const annotation of annotationCandidates) {
+    toAppend.push(annotation);
+  }
+
+  for (const association of associationCandidates) {
+    const referencesAnnotation = hasReferenceToAnyId(
+      association,
+      annotationIds,
+      new WeakSet<object>(),
+    );
+    const referencesCopiedShape = hasReferenceToAnyId(
+      association,
+      existingIds,
+      new WeakSet<object>(),
+    );
+
+    if (referencesAnnotation || referencesCopiedShape) {
+      toAppend.push(association);
+    }
+  }
+
+  for (const shape of toAppend) {
+    if (typeof shape.resourceId !== "string" || !shape.resourceId.trim()) {
+      continue;
+    }
+
+    if (existingIds.has(shape.resourceId)) {
+      continue;
+    }
+
+    payload.childShapes.push(clone(shape));
+    existingIds.add(shape.resourceId);
+  }
+};
+
+export function preparePayloadForFavoriteStorage(payload: unknown): unknown {
+  if (!isRecord(payload) || !Array.isArray(payload.childShapes)) {
+    return clone(payload);
+  }
+
+  const cloned = clone(payload) as UnknownRecord;
+  appendLinkedAnnotationsAndConnectors(cloned);
+  return cloned;
+}
+
 export function getSuggestedFavoriteName(payload: unknown): string {
   const info = getPrimaryShapeInfo(payload);
+  const topLevelNodeCount = getTopLevelNodeCount(payload);
+  let baseName = info.typeName || "Favorite snippet";
 
-  if (!info.hasContent) {
-    return info.typeName || "Favorite snippet";
+  if (info.hasContent) {
+    const contentPrefix = getFirstWords(info.contentText, 2);
+    if (contentPrefix) {
+      baseName = `${info.typeName}: ${contentPrefix}`;
+    }
   }
 
-  const contentPrefix = getFirstWords(info.contentText, 2);
-  if (!contentPrefix) {
-    return info.typeName || "Favorite snippet";
+  if (topLevelNodeCount > 1) {
+    return `${baseName}, more...`;
   }
 
-  return `${info.typeName}: ${contentPrefix}`;
+  return baseName;
 }
 
 export function sanitizePayloadForReuse(payload: unknown): unknown {
@@ -526,7 +717,7 @@ export function sanitizePayloadForReuse(payload: unknown): unknown {
     return clone(payload);
   }
 
-  const cloned = clone(payload) as UnknownRecord;
+  const cloned = preparePayloadForFavoriteStorage(payload) as UnknownRecord;
   const shapes = collectAllShapes(getChildShapeArray(cloned));
   const ids = collectResourceIds(shapes);
   const idMap = createIdMap(ids);

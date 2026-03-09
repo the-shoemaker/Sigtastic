@@ -14,7 +14,7 @@ import {
 } from "../src/content/signavio-clipboard";
 import { FavoritesOverlay } from "../src/content/overlay";
 import type { ClipboardCapture, ContentMessage } from "../src/shared/types";
-import { getSuggestedFavoriteName } from "../src/shared/payload";
+import { getPrimaryShapeInfo, getSuggestedFavoriteName } from "../src/shared/payload";
 
 const MESSAGE_SOURCE = "signavio-bpkeys-hook";
 let overlay: FavoritesOverlay | null = null;
@@ -64,6 +64,170 @@ const toast = (() => {
     }, 2500);
   };
 })();
+
+const showSaveFavoriteModal = (
+  defaults: {
+    name: string;
+    content: string;
+  },
+): Promise<{ name: string; content: string } | null> =>
+  new Promise((resolve) => {
+    const host = document.createElement("div");
+    host.style.position = "fixed";
+    host.style.inset = "0";
+    host.style.zIndex = "2147483647";
+    host.style.display = "grid";
+    host.style.placeItems = "center";
+
+    const scrim = document.createElement("div");
+    scrim.style.position = "absolute";
+    scrim.style.inset = "0";
+    scrim.style.background = "rgba(10, 12, 14, 0.4)";
+    scrim.style.backdropFilter = "blur(3px)";
+
+    const panel = document.createElement("div");
+    panel.style.position = "relative";
+    panel.style.width = "min(720px, calc(100vw - 32px))";
+    panel.style.maxWidth = "100%";
+    panel.style.maxHeight = "calc(100vh - 32px)";
+    panel.style.overflow = "auto";
+    panel.style.boxSizing = "border-box";
+    panel.style.padding = "16px";
+    panel.style.borderRadius = "16px";
+    panel.style.background = "rgba(26, 28, 33, 0.92)";
+    panel.style.border = "1px solid rgba(255, 255, 255, 0.2)";
+    panel.style.boxShadow = "0 22px 54px rgba(0, 0, 0, 0.62)";
+    panel.style.display = "grid";
+    panel.style.gap = "12px";
+    panel.style.fontFamily = "\"Avenir Next\", \"Segoe UI\", sans-serif";
+    panel.addEventListener("click", (event) => event.stopPropagation());
+
+    const title = document.createElement("div");
+    title.textContent = "Save Favorite";
+    title.style.fontSize = "18px";
+    title.style.fontWeight = "700";
+    title.style.color = "#f3f3f3";
+
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = "Name";
+    nameLabel.style.fontSize = "12px";
+    nameLabel.style.fontWeight = "600";
+    nameLabel.style.color = "rgba(243,243,243,0.86)";
+    nameLabel.style.display = "grid";
+    nameLabel.style.gap = "6px";
+    nameLabel.style.minWidth = "0";
+
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = defaults.name;
+    nameInput.style.display = "block";
+    nameInput.style.width = "100%";
+    nameInput.style.maxWidth = "100%";
+    nameInput.style.minWidth = "0";
+    nameInput.style.boxSizing = "border-box";
+    nameInput.style.padding = "9px 11px";
+    nameInput.style.borderRadius = "10px";
+    nameInput.style.border = "1px solid rgba(255,255,255,0.18)";
+    nameInput.style.background = "rgba(255,255,255,0.08)";
+    nameInput.style.color = "#ececec";
+    nameInput.style.fontSize = "15px";
+    nameInput.style.outline = "none";
+
+    const contentLabel = document.createElement("label");
+    contentLabel.textContent = "Content";
+    contentLabel.style.fontSize = "12px";
+    contentLabel.style.fontWeight = "600";
+    contentLabel.style.color = "rgba(243,243,243,0.86)";
+    contentLabel.style.display = "grid";
+    contentLabel.style.gap = "6px";
+    contentLabel.style.minWidth = "0";
+
+    const contentInput = document.createElement("input");
+    contentInput.type = "text";
+    contentInput.value = defaults.content;
+    contentInput.style.display = "block";
+    contentInput.style.width = "100%";
+    contentInput.style.maxWidth = "100%";
+    contentInput.style.minWidth = "0";
+    contentInput.style.boxSizing = "border-box";
+    contentInput.style.padding = "9px 11px";
+    contentInput.style.borderRadius = "10px";
+    contentInput.style.border = "1px solid rgba(255,255,255,0.18)";
+    contentInput.style.background = "rgba(255,255,255,0.08)";
+    contentInput.style.color = "#ececec";
+    contentInput.style.fontSize = "15px";
+    contentInput.style.outline = "none";
+
+    nameLabel.append(nameInput);
+    contentLabel.append(contentInput);
+
+    const buttons = document.createElement("div");
+    buttons.style.display = "flex";
+    buttons.style.justifyContent = "flex-end";
+    buttons.style.gap = "8px";
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.textContent = "Cancel";
+    cancelButton.style.padding = "8px 12px";
+    cancelButton.style.borderRadius = "10px";
+    cancelButton.style.border = "1px solid rgba(255,255,255,0.2)";
+    cancelButton.style.background = "rgba(255,255,255,0.06)";
+    cancelButton.style.color = "#ececec";
+    cancelButton.style.cursor = "pointer";
+
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.textContent = "Save";
+    saveButton.style.padding = "8px 12px";
+    saveButton.style.borderRadius = "10px";
+    saveButton.style.border = "1px solid rgba(255,255,255,0.32)";
+    saveButton.style.background = "rgba(255,255,255,0.16)";
+    saveButton.style.color = "#f6f6f6";
+    saveButton.style.fontWeight = "700";
+    saveButton.style.cursor = "pointer";
+
+    buttons.append(cancelButton, saveButton);
+    panel.append(title, nameLabel, contentLabel, buttons);
+    host.append(scrim, panel);
+    document.body.append(host);
+
+    const close = (result: { name: string; content: string } | null) => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      host.remove();
+      resolve(result);
+    };
+
+    const onSave = () => {
+      close({
+        name: nameInput.value.trim(),
+        content: contentInput.value.trim(),
+      });
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close(null);
+        return;
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        onSave();
+      }
+    };
+
+    scrim.addEventListener("click", () => close(null));
+    cancelButton.addEventListener("click", () => close(null));
+    saveButton.addEventListener("click", onSave);
+    document.addEventListener("keydown", onKeyDown, true);
+
+    window.setTimeout(() => {
+      nameInput.focus();
+      nameInput.select();
+    }, 0);
+  });
 
 const isClipboardCapture = (value: unknown): value is ClipboardCapture => {
   if (typeof value !== "object" || value === null) {
@@ -195,19 +359,29 @@ const handleSaveFavorite = async () => {
     return;
   }
 
-  const fallbackName = getSuggestedFavoriteName(latestCapture.valueJson);
-  const enteredName = window.prompt("Name this favorite snippet:", fallbackName);
-  if (!enteredName) {
+  const shapeInfo = getPrimaryShapeInfo(latestCapture.valueJson);
+  const defaults = {
+    name: getSuggestedFavoriteName(latestCapture.valueJson),
+    content: shapeInfo.contentText,
+  };
+
+  const input = await showSaveFavoriteModal(defaults);
+  if (!input) {
     return;
   }
 
-  const name = enteredName.trim();
+  const name = input.name.trim();
   if (!name) {
     toast("Favorite name cannot be empty.");
     return;
   }
 
-  await addFavorite(name, latestCapture);
+  await addFavorite(name, latestCapture, {
+    displayName: input.name,
+    displayContent: input.content,
+    defaultDisplayName: defaults.name,
+    defaultDisplayContent: defaults.content,
+  });
   if (overlay?.isOpen()) {
     const favorites = await getFavorites();
     overlay.refreshFavorites(favorites);

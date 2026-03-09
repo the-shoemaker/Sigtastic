@@ -1,4 +1,5 @@
 import type { ClipboardCapture, Favorite } from "./types";
+import { preparePayloadForFavoriteStorage } from "./payload";
 
 const FAVORITES_KEY = "favorites";
 const LAST_CAPTURE_KEY = "lastCapture";
@@ -106,14 +107,38 @@ export async function setLatestCapture(capture: ClipboardCapture): Promise<void>
 export async function addFavorite(
   name: string,
   capture: ClipboardCapture,
+  options?: {
+    displayName?: string;
+    displayContent?: string;
+    defaultDisplayName?: string;
+    defaultDisplayContent?: string;
+  },
 ): Promise<Favorite> {
   const favorites = await getFavorites();
   const now = Date.now();
   const uniqueName = makeUniqueFavoriteName(name, favorites);
+  const defaultDisplayName = normalizeName(options?.defaultDisplayName ?? "");
+  const defaultDisplayContent = normalizeName(options?.defaultDisplayContent ?? "");
+  const nameCandidate =
+    (options?.displayName ?? defaultDisplayName) || name || uniqueName;
+  const displayName = normalizeName(nameCandidate);
+  const displayContent = normalizeName(options?.displayContent ?? defaultDisplayContent);
+  const displayNameCustom =
+    displayName.length > 0 && defaultDisplayName.length > 0
+      ? displayName.toLowerCase() !== defaultDisplayName.toLowerCase()
+      : displayName.length > 0;
+  const displayContentCustom =
+    displayContent.length > 0 && defaultDisplayContent.length > 0
+      ? displayContent.toLowerCase() !== defaultDisplayContent.toLowerCase()
+      : displayContent.length > 0;
   const favorite: Favorite = {
     id: crypto.randomUUID(),
     name: uniqueName,
-    payload: clone(capture.valueJson),
+    displayName,
+    displayNameCustom,
+    displayContent,
+    displayContentCustom,
+    payload: preparePayloadForFavoriteStorage(capture.valueJson),
     namespace: capture.namespace,
     requestTemplate: capture.requestTemplate ? clone(capture.requestTemplate) : undefined,
     order: favorites.length,

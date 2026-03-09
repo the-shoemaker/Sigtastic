@@ -16,6 +16,10 @@ export type ClipboardCapture = {
 export type Favorite = {
   id: string;
   name: string;
+  displayName?: string;
+  displayNameCustom?: boolean;
+  displayContent?: string;
+  displayContentCustom?: boolean;
   payload: unknown;
   namespace: string;
   requestTemplate?: ClipboardRequestTemplate;
