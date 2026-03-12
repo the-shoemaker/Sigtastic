@@ -5,9 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "wxt --browser firefox",
+    "dev:chrome": "wxt --browser chrome",
     "prepare:types": "wxt prepare",
-    "build": "wxt build --browser firefox",
+    "build:firefox": "wxt build --browser firefox",
+    "build:chrome": "wxt build --browser chrome",
+    "build": "npm run build:firefox && npm run build:chrome",
     "zip": "wxt zip --browser firefox",
+    "zip:chrome": "wxt zip --browser chrome",
     "typecheck": "npm run prepare:types && tsc --noEmit"
   },
   "dependencies": {

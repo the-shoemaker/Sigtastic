@@ -14,6 +14,11 @@
   let lastClipboardHeaders = {};
   let lastClipboardParams = null;
   let lastPointerTarget = null;
+  let lastPointerShapeId = "";
+  let lastShapePointerTarget = null;
+  let lastResolvedShapeObject = null;
+  let lastResolvedFacade = null;
+  const lastKnownTaskTypes = new Map();
 
   const nativeFetch = window.fetch.bind(window);
   const nativeOpen = XMLHttpRequest.prototype.open;
@@ -162,6 +167,10 @@
   };
 
   const getPointerShapeId = () => {
+    if (lastPointerShapeId) {
+      return lastPointerShapeId;
+    }
+
     if (!(lastPointerTarget instanceof Element)) {
       return "";
     }
@@ -180,6 +189,30 @@
         return found;
       }
       current = current.parentElement;
+    }
+
+    return "";
+  };
+
+  const extractShapeIdFromEvent = (event) => {
+    if (!event || typeof event.composedPath !== "function") {
+      return "";
+    }
+
+    const path = event.composedPath();
+    for (const entry of path) {
+      if (!(entry instanceof Element)) {
+        continue;
+      }
+
+      const found =
+        extractShapeId(entry.id || "") ||
+        extractShapeId(entry.getAttribute("data-resource-id")) ||
+        extractShapeId(entry.getAttribute("data-shape-id")) ||
+        extractShapeId(entry.getAttribute("resource-id"));
+      if (found) {
+        return found;
+      }
     }
 
     return "";
@@ -242,6 +275,25 @@
     }
 
     return output;
+  };
+
+  const isVisibleSelector = (selector) => {
+    const node = document.querySelector(selector);
+    return node instanceof Element && isVisibleElement(node);
+  };
+
+  const hasVisibleLoadingUi = () => {
+    const selectors = [
+      ".x-mask-loading",
+      ".x-mask-msg",
+      ".x-mask",
+      "[aria-busy='true']",
+      ".loading",
+      ".spinner",
+      ".busy",
+    ];
+
+    return selectors.some((selector) => isVisibleSelector(selector));
   };
 
   const cloneSearchParams = (params) => {
@@ -634,7 +686,41 @@
     }
   };
 
+  const scoreFacadeCandidate = (facade) => {
+    if (!facade || (typeof facade !== "object" && typeof facade !== "function")) {
+      return -1;
+    }
+
+    let score = 0;
+    const selection = getFacadeSelection(facade);
+
+    if (selection.length > 0) {
+      score += 400;
+    }
+    if (typeof facade.executeCommands === "function") {
+      score += 220;
+    }
+    if (typeof facade.getCanvas === "function") {
+      score += 180;
+    }
+    if (typeof facade.getSelection === "function") {
+      score += 120;
+    }
+    if (typeof facade.raiseEvent === "function") {
+      score += 80;
+    }
+    if (typeof facade.updateSelection === "function") {
+      score += 60;
+    }
+
+    return score;
+  };
+
   const findEditorFacade = () => {
+    if (lastResolvedFacade) {
+      return lastResolvedFacade;
+    }
+
     const seen = new Set();
     const candidates = [];
     const propertyBudget = { count: 280 };
@@ -666,22 +752,49 @@
       collectFacadeCandidates(value, seen, candidates, 1, propertyBudget);
     }
 
-    for (const facade of candidates) {
-      if (getFacadeSelection(facade).length > 0) {
-        return facade;
-      }
-    }
+    const rankedCandidates = candidates
+      .map((candidate) => ({ candidate, score: scoreFacadeCandidate(candidate) }))
+      .filter((entry) => entry.score >= 0)
+      .sort((left, right) => right.score - left.score);
 
-    return candidates[0] || null;
+    lastResolvedFacade = rankedCandidates[0]?.candidate || null;
+    return lastResolvedFacade;
   };
 
   const resolveShape = (entry) => {
     if (!entry) {
       return null;
     }
-    if (entry.shape && (typeof entry.shape === "object" || typeof entry.shape === "function")) {
-      return entry.shape;
+
+    const directCandidates = [entry];
+    for (const key of ["shape", "_shape", "model", "node", "element", "oryxShape"]) {
+      try {
+        if (entry[key]) {
+          directCandidates.push(entry[key]);
+        }
+      } catch {}
     }
+
+    let bestCandidate = null;
+    let bestScore = -1;
+
+    for (const candidate of directCandidates) {
+      const resolved = findMatchingShapeObject(candidate, "", 2, new Set(), true);
+      if (!resolved) {
+        continue;
+      }
+
+      const score = scoreShapeCandidate(resolved, "", true);
+      if (score > bestScore) {
+        bestCandidate = resolved;
+        bestScore = score;
+      }
+    }
+
+    if (bestCandidate) {
+      return bestCandidate;
+    }
+
     return entry;
   };
 
@@ -779,19 +892,416 @@
     return summarizeBoundObject(value);
   };
 
+  const getSafeOwnPropertyEntries = (value, limit = 18) => {
+    if (!value || (typeof value !== "object" && typeof value !== "function")) {
+      return [];
+    }
+
+    const out = [];
+    let keys = [];
+    try {
+      keys = Object.getOwnPropertyNames(value).slice(0, limit);
+    } catch {
+      return out;
+    }
+
+    for (const key of keys) {
+      let descriptor;
+      try {
+        descriptor = Object.getOwnPropertyDescriptor(value, key);
+      } catch {
+        continue;
+      }
+
+      if (!descriptor || typeof descriptor.get === "function") {
+        continue;
+      }
+
+      if (!("value" in descriptor)) {
+        continue;
+      }
+
+      out.push([key, descriptor.value]);
+    }
+
+    return out;
+  };
+
+  const isShapeLikeObject = (value) => {
+    if (!value || (typeof value !== "object" && typeof value !== "function")) {
+      return false;
+    }
+
+    const objectId = getObjectId(value);
+    const stencilId = getStencilId(value);
+    return Boolean(
+      objectId ||
+      stencilId ||
+      typeof value.setProperty === "function" ||
+      typeof value.getProperty === "function" ||
+      typeof value.getStencil === "function",
+    );
+  };
+
+  const getCandidateShapeObjects = (value) => {
+    const candidates = [];
+
+    if (isShapeLikeObject(value)) {
+      candidates.push(value);
+    }
+
+    for (const [key, nested] of getSafeOwnPropertyEntries(value, 24)) {
+      if (
+        key === "shape" ||
+        key === "_shape" ||
+        key === "model" ||
+        key === "node" ||
+        key === "element" ||
+        key === "oryxShape"
+      ) {
+        if (isShapeLikeObject(nested)) {
+          candidates.push(nested);
+        }
+      }
+    }
+
+    return candidates;
+  };
+
+  const scoreShapeCandidate = (value, targetId = "", preferTaskType = false) => {
+    if (!value || (typeof value !== "object" && typeof value !== "function")) {
+      return -1;
+    }
+
+    const normalizedId = extractShapeId(targetId);
+    const objectId = extractShapeId(getObjectId(value));
+    const stencilId = getStencilId(value).toLowerCase();
+    const hasTaskTypeProperty = supportsTaskTypeProperty(value);
+    const hasSetProperty = typeof value.setProperty === "function";
+    const hasGetProperty = typeof value.getProperty === "function";
+
+    if (normalizedId && objectId && objectId !== normalizedId) {
+      return -1;
+    }
+
+    if (normalizedId && !objectId) {
+      return -1;
+    }
+
+    let score = 0;
+
+    if (normalizedId && objectId === normalizedId) {
+      score += 1000;
+    }
+    if (hasTaskTypeProperty) {
+      score += 240;
+    }
+    if (preferTaskType && hasTaskTypeProperty) {
+      score += 200;
+    }
+    if (stencilId.includes("task") && !stencilId.includes("subprocess")) {
+      score += 120;
+    } else if (stencilId.includes("activity")) {
+      score += 80;
+    }
+    if (hasSetProperty) {
+      score += 40;
+    }
+    if (hasGetProperty) {
+      score += 25;
+    }
+    if (objectId) {
+      score += 15;
+    }
+    if (stencilId) {
+      score += 10;
+    }
+
+    return score;
+  };
+
+  const getLikelyNestedShapeValues = (value) => {
+    const nested = [];
+    if (!value || (typeof value !== "object" && typeof value !== "function")) {
+      return nested;
+    }
+
+    for (const key of [
+      "shape",
+      "_shape",
+      "model",
+      "node",
+      "element",
+      "oryxShape",
+      "children",
+      "childShapes",
+      "nodes",
+      "shapes",
+      "_children",
+      "_childShapes",
+      "_nodes",
+      "_shapes",
+      "canvas",
+      "_canvas",
+    ]) {
+      let candidate;
+      try {
+        candidate = value[key];
+      } catch {
+        continue;
+      }
+
+      if (!candidate) {
+        continue;
+      }
+
+      if (Array.isArray(candidate)) {
+        nested.push(...candidate);
+      } else {
+        nested.push(candidate);
+      }
+    }
+
+    for (const methodName of ["getChildShapes", "getChildren", "getChildNodes", "getNodes"]) {
+      try {
+        if (typeof value[methodName] === "function") {
+          const result = value[methodName]();
+          if (Array.isArray(result)) {
+            nested.push(...result);
+          } else if (result) {
+            nested.push(...normalizeCollection(result));
+          }
+        }
+      } catch {}
+    }
+
+    return nested;
+  };
+
+  const findMatchingShapeObject = (
+    value,
+    targetId,
+    depth = 3,
+    seen = new Set(),
+    preferTaskType = false,
+  ) => {
+    if (!value || (typeof value !== "object" && typeof value !== "function") || depth < 0) {
+      return null;
+    }
+    if (seen.has(value)) {
+      return null;
+    }
+    seen.add(value);
+
+    const normalizedId = extractShapeId(targetId);
+    let bestCandidate = null;
+    let bestScore = -1;
+
+    const considerCandidate = (candidate) => {
+      if (!candidate || !isShapeLikeObject(candidate)) {
+        return;
+      }
+
+      const score = scoreShapeCandidate(candidate, normalizedId, preferTaskType);
+      if (score > bestScore) {
+        bestCandidate = candidate;
+        bestScore = score;
+      }
+    };
+
+    considerCandidate(value);
+
+    for (const candidate of getCandidateShapeObjects(value)) {
+      considerCandidate(candidate);
+    }
+
+    if (bestCandidate && (normalizedId || bestScore >= 80)) {
+      return bestCandidate;
+    }
+
+    if (depth === 0) {
+      return null;
+    }
+
+    for (const nested of getLikelyNestedShapeValues(value)) {
+      const found = findMatchingShapeObject(nested, normalizedId, depth - 1, seen, preferTaskType);
+      if (found) {
+        return found;
+      }
+    }
+
+    for (const [, nested] of getSafeOwnPropertyEntries(value, 24)) {
+      const found = findMatchingShapeObject(nested, normalizedId, depth - 1, seen, preferTaskType);
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  };
+
+  const resolveShapeFromElementBindings = (targetId) => {
+    const normalizedId = extractShapeId(targetId);
+    const target = lastShapePointerTarget instanceof Element
+      ? lastShapePointerTarget
+      : lastPointerTarget instanceof Element
+        ? lastPointerTarget
+        : null;
+    if (!normalizedId || !target) {
+      return null;
+    }
+
+    const seen = new Set();
+    let current = target;
+    let depth = 0;
+
+    while (current && depth < 8) {
+      const directValues = [
+        ...getSafeOwnPropertyEntries(current, 60).map(([, value]) => value),
+      ];
+
+      if (
+        window.Element &&
+        window.Element.Storage &&
+        typeof window.Element.Storage.get === "function"
+      ) {
+        try {
+          const raw = window.Element.Storage.get(current);
+          if (raw && typeof raw === "object") {
+            directValues.push(...Object.values(raw));
+          }
+        } catch {}
+      }
+
+      for (const value of directValues) {
+        const candidate = findMatchingShapeObject(value, normalizedId, 3, seen, true);
+        if (candidate) {
+          const candidateId = getObjectId(candidate);
+          if (extractShapeId(candidateId) === normalizedId) {
+            return candidate;
+          }
+        }
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  };
+
+  const resolveNearestShapeFromElementBindings = () => {
+    const target = lastShapePointerTarget instanceof Element
+      ? lastShapePointerTarget
+      : lastPointerTarget instanceof Element
+        ? lastPointerTarget
+        : null;
+    if (!target) {
+      return null;
+    }
+
+    const seen = new Set();
+    let current = target;
+    let depth = 0;
+
+    while (current && depth < 8) {
+      const directValues = [
+        ...getSafeOwnPropertyEntries(current, 60).map(([, value]) => value),
+      ];
+
+      if (
+        window.Element &&
+        window.Element.Storage &&
+        typeof window.Element.Storage.get === "function"
+      ) {
+        try {
+          const raw = window.Element.Storage.get(current);
+          if (raw && typeof raw === "object") {
+            directValues.push(...Object.values(raw));
+          }
+        } catch {}
+      }
+
+      for (const value of directValues) {
+        const candidate = findMatchingShapeObject(value, "", 3, seen, true);
+        if (candidate) {
+          return candidate;
+        }
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  };
+
+  const cachePointerShapeBinding = (targetId, targetElement) => {
+    const normalizedId = extractShapeId(targetId);
+    if (!normalizedId) {
+      return null;
+    }
+
+    if (
+      lastResolvedShapeObject &&
+      extractShapeId(getObjectId(lastResolvedShapeObject)) === normalizedId
+    ) {
+      return lastResolvedShapeObject;
+    }
+
+    const previousTarget = lastShapePointerTarget;
+    if (targetElement instanceof Element) {
+      lastShapePointerTarget = targetElement;
+    }
+
+    const resolved =
+      resolveShapeFromElementBindings(normalizedId) ||
+      findShapeByIdInFacade(findEditorFacade(), normalizedId) ||
+      null;
+
+    if (resolved) {
+      lastResolvedShapeObject = resolved;
+    }
+
+    lastShapePointerTarget = previousTarget;
+    return resolved;
+  };
+
+  const findShapeByIdInFacade = (facade, targetId) => {
+    const normalizedId = extractShapeId(targetId);
+    if (!facade || !normalizedId) {
+      return null;
+    }
+
+    const roots = [];
+    roots.push(facade);
+
+    try {
+      if (typeof facade.getCanvas === "function") {
+        const canvas = facade.getCanvas();
+        if (canvas) {
+          roots.push(canvas);
+        }
+      }
+    } catch {}
+
+    for (const root of roots) {
+      const found = findMatchingShapeObject(root, normalizedId, 6, new Set(), true);
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  };
+
   const searchForShapeRefs = (targetId) => {
     if (!targetId) {
       return [];
     }
 
     const roots = [];
-    for (const key of Object.getOwnPropertyNames(window)) {
-      let value;
-      try {
-        value = window[key];
-      } catch {
-        continue;
-      }
+    for (const [key, value] of getSafeOwnPropertyEntries(window, 260)) {
       if (value && (typeof value === "object" || typeof value === "function")) {
         roots.push({ path: `window.${key}`, value });
       }
@@ -822,6 +1332,7 @@
       if (objectId && objectId === targetId) {
         matches.push({
           path: current.path,
+          value,
           objectId,
           keys: Object.getOwnPropertyNames(value).slice(0, 20),
           hasSetProperty: typeof value.setProperty === "function",
@@ -831,18 +1342,7 @@
         });
       }
 
-      let keys = [];
-      try {
-        keys = Object.getOwnPropertyNames(value).slice(0, 18);
-      } catch {}
-
-      for (const key of keys) {
-        let nested;
-        try {
-          nested = value[key];
-        } catch {
-          continue;
-        }
+      for (const [key, nested] of getSafeOwnPropertyEntries(value, 18)) {
         if (!nested || (typeof nested !== "object" && typeof nested !== "function")) {
           continue;
         }
@@ -856,35 +1356,117 @@
     return matches;
   };
 
-  const getPointerSelectedShape = () => {
-    const targetId = getPointerShapeId();
-    if (!targetId) {
+  const resolveShapeById = (targetId) => {
+    const normalizedId = extractShapeId(targetId);
+    if (!normalizedId) {
       return null;
     }
 
-    const matches = searchForShapeRefs(targetId);
+    if (
+      lastResolvedShapeObject &&
+      extractShapeId(getObjectId(lastResolvedShapeObject)) === normalizedId
+    ) {
+      return lastResolvedShapeObject;
+    }
+
+    const boundShape = resolveShapeFromElementBindings(normalizedId);
+    if (boundShape) {
+      lastResolvedShapeObject = boundShape;
+      return boundShape;
+    }
+
+    const facade = findEditorFacade();
+    const facadeShape = findShapeByIdInFacade(facade, normalizedId);
+    if (facadeShape) {
+      lastResolvedShapeObject = facadeShape;
+      return facadeShape;
+    }
+
+    const matches = searchForShapeRefs(normalizedId);
     const bestMatch = matches.find((match) => match.hasSetProperty || match.hasGetStencil) || matches[0];
     if (!bestMatch) {
       return null;
     }
 
-    let value = window;
-    const pathParts = bestMatch.path.replace(/^window\./, "").split(".");
-    for (const part of pathParts) {
-      if (!part) continue;
-      try {
-        value = value[part];
-      } catch {
-        return null;
+    lastResolvedShapeObject = bestMatch.value || null;
+    return lastResolvedShapeObject;
+  };
+
+  const getPointerSelectedShape = () => {
+    const targetId = getPointerShapeId();
+    if (targetId) {
+      const resolved = resolveShapeById(targetId);
+      if (resolved) {
+        return resolved;
       }
     }
 
-    return value || null;
+    return resolveNearestShapeFromElementBindings();
+  };
+
+  const getSelectionShapeId = (selectedShapes) => {
+    const firstShape = selectedShapes[0] || null;
+    const shapeId = firstShape ? getObjectId(firstShape) : "";
+    if (shapeId) {
+      return shapeId;
+    }
+
+    const pointerShapeId = getPointerShapeId();
+    return pointerShapeId || null;
   };
 
   const isTaskLikeShape = (shape) => {
     const stencil = getStencilId(shape).toLowerCase();
     return stencil.includes("task") || stencil.includes("activity");
+  };
+
+  const getCachedTaskType = (shapeId) => {
+    const normalizedId = extractShapeId(shapeId);
+    if (!normalizedId || !lastKnownTaskTypes.has(normalizedId)) {
+      return null;
+    }
+
+    return normalizeTaskType(lastKnownTaskTypes.get(normalizedId));
+  };
+
+  const rememberTaskType = (shapeId, taskTypeValue) => {
+    const normalizedId = extractShapeId(shapeId);
+    const normalizedTaskType = normalizeTaskType(taskTypeValue);
+    if (!normalizedId || !normalizedTaskType) {
+      return;
+    }
+
+    lastKnownTaskTypes.set(normalizedId, getTaskTypeOptionLabel(normalizedTaskType));
+  };
+
+  const getDirectTaskTypeValue = (taskType) => {
+    const normalized = normalizeTaskType(taskType);
+    if (!normalized || normalized === "none") {
+      return "";
+    }
+
+    return getTaskTypeOptionLabel(normalized);
+  };
+
+  const supportsTaskTypeProperty = (shape) => {
+    if (!shape) {
+      return false;
+    }
+
+    try {
+      if (typeof shape.getStencil === "function") {
+        const stencil = shape.getStencil();
+        if (stencil && typeof stencil.property === "function") {
+          const property = stencil.property("oryx-tasktype");
+          if (property !== undefined && property !== null) {
+            return true;
+          }
+        }
+      }
+    } catch {}
+
+    const stencilId = getStencilId(shape).toLowerCase();
+    return (stencilId.includes("task") && !stencilId.includes("subprocess")) || stencilId.includes("activity");
   };
 
   const hasPointerSelection = () => Boolean(getPointerShapeId());
@@ -909,7 +1491,7 @@
 
   const isTaskTypeText = (value) => {
     const text = normalizeVisibleText(value);
-    return text === "task type" || text.startsWith("task type") || text.includes("task type ");
+    return text === "task type";
   };
 
   const getTaskTypeTextCandidates = () => {
@@ -1003,6 +1585,56 @@
 
   const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
+  const getEditorReadySnapshot = () => {
+    const facade = findEditorFacade();
+    const canvasVisible =
+      isVisibleSelector("#oryx_canvas") ||
+      isVisibleSelector("#oryx_canvas_htmlContainer") ||
+      isVisibleSelector("svg");
+    const toolbarVisible =
+      isVisibleSelector(".toolbar") ||
+      isVisibleSelector("[class*='toolbar']") ||
+      isVisibleSelector("[id*='editor-north']");
+    const facadeReady = Boolean(
+      facade &&
+      typeof facade.getCanvas === "function" &&
+      (typeof facade.getSelection === "function" || typeof facade.executeCommands === "function"),
+    );
+    const extReady = Boolean(window.Ext && window.Ext.ComponentMgr);
+
+    return {
+      canvasVisible,
+      toolbarVisible,
+      facadeReady,
+      extReady,
+      loadingVisible: hasVisibleLoadingUi(),
+    };
+  };
+
+  const isEditorReady = () => {
+    const snapshot = getEditorReadySnapshot();
+    return (
+      snapshot.canvasVisible &&
+      snapshot.toolbarVisible &&
+      snapshot.extReady &&
+      snapshot.facadeReady &&
+      !snapshot.loadingVisible
+    );
+  };
+
+  const waitForEditorReady = async (timeoutMs = 15000) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (isEditorReady()) {
+        return true;
+      }
+
+      await delay(150);
+    }
+
+    return isEditorReady();
+  };
+
   const getTaskTypeOptionLabel = (taskType) => {
     const normalized = normalizeTaskType(taskType);
     const labels = {
@@ -1020,31 +1652,51 @@
   };
 
   const findTaskTypeRowElements = () => {
-    const labelNode = getTaskTypeTextCandidates()[0] || null;
-    if (!labelNode) {
-      return null;
-    }
+    const candidates = getTaskTypeTextCandidates()
+      .map((labelNode) => {
+        const row =
+          labelNode.closest("tr") ||
+          labelNode.closest(".x-grid3-row") ||
+          labelNode.closest(".x-grid-panel") ||
+          labelNode.parentElement;
+        if (!(row instanceof Element) || !isVisibleElement(row)) {
+          return null;
+        }
 
-    const row =
-      labelNode.closest("tr") ||
-      labelNode.closest(".x-grid3-row") ||
-      labelNode.closest(".x-grid-panel") ||
-      labelNode.parentElement;
-    if (!row) {
-      return null;
-    }
+        const cells = row.querySelectorAll("td, .x-grid3-cell");
+        const valueCell =
+          cells.length > 1
+            ? cells[1]
+            : labelNode.closest("td")?.nextElementSibling || row.querySelector("input, .x-form-field-wrap");
+        const panelText = normalizeVisibleText(
+          row.closest(".x-panel-body, .x-panel, #east-panel, body")?.textContent || "",
+        );
+        const rowText = normalizeVisibleText(row.textContent || "");
+        const score =
+          (panelText.includes("main attributes") ? 100 : 0) +
+          (rowText.includes("receive") ||
+          rowText.includes("send") ||
+          rowText.includes("service") ||
+          rowText.includes("manual") ||
+          rowText.includes("script") ||
+          rowText.includes("business rule") ||
+          rowText.includes("user") ||
+          rowText.includes("none")
+            ? 20
+            : 0) -
+          rowText.length;
 
-    const cells = row.querySelectorAll("td, .x-grid3-cell");
-    const valueCell =
-      cells.length > 1
-        ? cells[1]
-        : labelNode.closest("td")?.nextElementSibling || row.querySelector("input, .x-form-field-wrap");
+        return {
+          labelNode,
+          row,
+          valueCell: valueCell || row,
+          score,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score);
 
-    return {
-      labelNode,
-      row,
-      valueCell: valueCell || row,
-    };
+    return candidates[0] || null;
   };
 
   const findVisibleOptionElement = (label) => {
@@ -1071,65 +1723,6 @@
   const activateTaskTypeEditor = async (rowParts) => {
     const before = new Set(getVisibleEditorFields());
     const targets = [rowParts.valueCell, rowParts.row].filter((node) => node instanceof Element);
-    const rowIndex = (() => {
-      const row = rowParts.row;
-      if (!(row instanceof Element)) {
-        return -1;
-      }
-      const parent = row.parentElement;
-      if (!parent) {
-        return -1;
-      }
-      return Array.from(parent.children).filter((child) => child.tagName === row.tagName).indexOf(row);
-    })();
-
-    const gridComponent = getExtComponents().find((component) => {
-      const element = getExtComponentElement(component);
-      if (!element || !element.contains(rowParts.row)) {
-        return false;
-      }
-
-      return (
-        typeof component.startEditing === "function" ||
-        typeof component.stopEditing === "function" ||
-        typeof component.getView === "function"
-      );
-    }) || null;
-
-    if (gridComponent && rowIndex >= 0) {
-      try {
-        if (typeof gridComponent.startEditing === "function") {
-          gridComponent.startEditing(rowIndex, 1);
-          await delay(50);
-        }
-      } catch {}
-
-      try {
-        if (typeof gridComponent.getSelectionModel === "function") {
-          const selectionModel = gridComponent.getSelectionModel();
-          if (selectionModel && typeof selectionModel.select === "function") {
-            selectionModel.select(rowIndex, 1);
-            await delay(20);
-          }
-        }
-      } catch {}
-
-      const activeElement = document.activeElement instanceof Element ? document.activeElement : null;
-      if (
-        activeElement &&
-        ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement.tagName) &&
-        isVisibleElement(activeElement)
-      ) {
-        return activeElement;
-      }
-
-      const afterGridEdit = getVisibleEditorFields();
-      const addedGridField = afterGridEdit.find((field) => !before.has(field));
-      if (addedGridField) {
-        return addedGridField;
-      }
-    }
-
     for (const target of targets) {
       target.focus?.();
       dispatchMouseClick(target);
@@ -1145,13 +1738,14 @@
       if (
         activeElement &&
         ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement.tagName) &&
+        rowParts.row.contains(activeElement) &&
         isVisibleElement(activeElement)
       ) {
         return activeElement;
       }
 
       const after = getVisibleEditorFields();
-      const added = after.find((field) => !before.has(field));
+      const added = after.find((field) => !before.has(field) && rowParts.row.contains(field));
       if (added) {
         return added;
       }
@@ -1241,6 +1835,334 @@
     return null;
   };
 
+  const isEastPanelExpanded = () => {
+    const panel = document.getElementById("east-panel");
+    if (!(panel instanceof Element) || !isVisibleElement(panel)) {
+      return false;
+    }
+
+    const rect = panel.getBoundingClientRect();
+    return rect.width > 120 && rect.height > 120;
+  };
+
+  const findAttributesToggleElement = () => {
+    const viewportWidth = window.innerWidth || 0;
+    const matches = getVisibleTextElements()
+      .filter((node) => {
+        const text = normalizeVisibleText(node.textContent || "");
+        if (!text) {
+          return false;
+        }
+
+        const relevant =
+          text === "attributes" ||
+          text.includes("attributes views variants") ||
+          text.includes("attributes") ||
+          text.includes("views") ||
+          text.includes("variants");
+        if (!relevant) {
+          return false;
+        }
+
+        const rect = node.getBoundingClientRect();
+        return rect.right >= viewportWidth - 140;
+      })
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        const leftScore =
+          (leftRect.right >= viewportWidth - 80 ? 200 : 0) +
+          (leftRect.height > leftRect.width ? 80 : 0) -
+          leftRect.width;
+        const rightScore =
+          (rightRect.right >= viewportWidth - 80 ? 200 : 0) +
+          (rightRect.height > rightRect.width ? 80 : 0) -
+          rightRect.width;
+        return rightScore - leftScore;
+      });
+
+    for (const node of matches) {
+      const clickable =
+        node.closest(
+          "button, [role='button'], a, .x-btn, .x-tab-strip-text, .x-tab-strip-wrap, .x-panel-header, [class*='tab']",
+        ) || node;
+      if (clickable instanceof Element && isVisibleElement(clickable)) {
+        return clickable;
+      }
+    }
+
+    return null;
+  };
+
+  const findRightRailToggleCandidates = () => {
+    if (typeof document.elementsFromPoint !== "function") {
+      return [];
+    }
+
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    const xs = [viewportWidth - 8, viewportWidth - 16, viewportWidth - 28, viewportWidth - 42].filter(
+      (value) => value > 0,
+    );
+    const ys = [
+      viewportHeight * 0.2,
+      viewportHeight * 0.35,
+      viewportHeight * 0.5,
+      viewportHeight * 0.65,
+      viewportHeight * 0.8,
+    ].map((value) => Math.max(1, Math.floor(value)));
+    const seen = new Set();
+    const matches = [];
+
+    for (const x of xs) {
+      for (const y of ys) {
+        let elements = [];
+        try {
+          elements = document.elementsFromPoint(x, y);
+        } catch {
+          elements = [];
+        }
+
+        for (const element of elements) {
+          if (!(element instanceof Element) || seen.has(element)) {
+            continue;
+          }
+          seen.add(element);
+
+          const clickable =
+            element.closest(
+              "button, [role='button'], a, .x-btn, .x-tab-strip-text, .x-tab-strip-wrap, .x-panel-header, [class*='tab'], [class*='panel']",
+            ) || element;
+          if (!(clickable instanceof Element) || !isVisibleElement(clickable)) {
+            continue;
+          }
+
+          const haystack = [
+            clickable.textContent || "",
+            clickable.getAttribute("title") || "",
+            clickable.getAttribute("aria-label") || "",
+            clickable.id || "",
+            clickable.className && typeof clickable.className === "string"
+              ? clickable.className
+              : String(clickable.className || ""),
+          ]
+            .join(" ")
+            .toLowerCase();
+
+          if (
+            haystack.includes("attribute") ||
+            haystack.includes("variant") ||
+            haystack.includes("view") ||
+            haystack.includes("east-panel") ||
+            clickable.getBoundingClientRect().right >= viewportWidth - 60
+          ) {
+            matches.push(clickable);
+          }
+        }
+      }
+    }
+
+    return matches.filter((candidate, index) => matches.indexOf(candidate) === index);
+  };
+
+  const findEastPanelComponentCandidates = () => {
+    return getExtComponents()
+      .map((component) => {
+        const element = getExtComponentElement(component);
+        const summary = summarizeExtComponent(component);
+        const haystack = [
+          summary.id,
+          summary.xtype,
+          summary.name,
+          summary.hiddenName,
+          summary.fieldLabel,
+          summary.text,
+          component.region,
+          component.title,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        let score = 0;
+        if (summary.id === "east-panel" || haystack.includes("east-panel")) {
+          score += 400;
+        }
+        if (haystack.includes("attribute")) {
+          score += 220;
+        }
+        if (haystack.includes("property")) {
+          score += 200;
+        }
+        if (haystack.includes("variant") || haystack.includes("view")) {
+          score += 60;
+        }
+        if (String(component.region || "").toLowerCase() === "east") {
+          score += 220;
+        }
+        if (element && element.getBoundingClientRect().right >= (window.innerWidth || 0) - 120) {
+          score += 80;
+        }
+
+        return {
+          component,
+          score,
+        };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .map((entry) => entry.component);
+  };
+
+  const setEastPanelExpanded = async (expanded) => {
+    if (isEastPanelExpanded() === expanded) {
+      return true;
+    }
+
+    const extCandidates = [getExtCmp("east-panel"), ...findEastPanelComponentCandidates()].filter(Boolean);
+    for (const panelCmp of extCandidates) {
+      try {
+        if (expanded && typeof panelCmp.expand === "function") {
+          panelCmp.expand();
+        } else if (!expanded && typeof panelCmp.collapse === "function") {
+          panelCmp.collapse();
+        } else if (expanded && typeof panelCmp.show === "function") {
+          panelCmp.show();
+        } else if (!expanded && typeof panelCmp.hide === "function") {
+          panelCmp.hide();
+        }
+      } catch {}
+
+      await delay(220);
+      if (isEastPanelExpanded() === expanded) {
+        return true;
+      }
+    }
+
+    const toggle = findAttributesToggleElement();
+    const rightRailToggles = findRightRailToggleCandidates();
+    for (const toggleCandidate of [toggle, ...rightRailToggles]) {
+      if (!toggleCandidate) {
+        continue;
+      }
+
+      dispatchMouseClick(toggleCandidate);
+      await delay(220);
+      if (isEastPanelExpanded() === expanded) {
+        break;
+      }
+
+      dispatchMouseClick(toggleCandidate);
+      await delay(220);
+      if (isEastPanelExpanded() === expanded) {
+        break;
+      }
+    }
+
+    return isEastPanelExpanded() === expanded;
+  };
+
+  const dispatchPointClick = (x, y) => {
+    if (typeof document.elementsFromPoint !== "function") {
+      return false;
+    }
+
+    let elements = [];
+    try {
+      elements = document.elementsFromPoint(x, y);
+    } catch {
+      elements = [];
+    }
+
+    for (const element of elements) {
+      if (!(element instanceof Element) || !isVisibleElement(element)) {
+        continue;
+      }
+
+      const options = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+      };
+
+      element.dispatchEvent(new MouseEvent("pointerdown", options));
+      element.dispatchEvent(new MouseEvent("mousedown", options));
+      element.dispatchEvent(new MouseEvent("mouseup", options));
+      element.dispatchEvent(new MouseEvent("click", options));
+      return true;
+    }
+
+    return false;
+  };
+
+  const forceRightRailOpen = async () => {
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    const xs = [viewportWidth - 4, viewportWidth - 10, viewportWidth - 18, viewportWidth - 28].filter(
+      (value) => value > 0,
+    );
+    const ys = [
+      viewportHeight * 0.18,
+      viewportHeight * 0.28,
+      viewportHeight * 0.4,
+      viewportHeight * 0.52,
+      viewportHeight * 0.64,
+      viewportHeight * 0.78,
+    ].map((value) => Math.max(1, Math.floor(value)));
+
+    for (const x of xs) {
+      for (const y of ys) {
+        if (!dispatchPointClick(x, y)) {
+          continue;
+        }
+
+        await delay(160);
+        if (isEastPanelExpanded()) {
+          return true;
+        }
+
+        dispatchPointClick(x, y);
+        await delay(160);
+        if (isEastPanelExpanded()) {
+          return true;
+        }
+      }
+    }
+
+    return isEastPanelExpanded();
+  };
+
+  const reselectCurrentShapeOnCanvas = async () => {
+    const facade = findEditorFacade();
+    const selectedShapes = facade ? getSelectedShapes(facade) : [];
+    const shapeId = getSelectionShapeId(selectedShapes) || getPointerShapeId();
+    const shapeElement = findShapeAnchorElement(shapeId);
+    if (!(shapeElement instanceof Element)) {
+      return false;
+    }
+
+    shapeElement.focus?.();
+    dispatchMouseClick(shapeElement);
+    await delay(120);
+    dispatchMouseClick(shapeElement);
+    await delay(140);
+    return true;
+  };
+
+  const waitForTaskTypeRow = async (timeoutMs = 1800) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const row = findTaskTypeRowElements();
+      if (row) {
+        return row;
+      }
+      await delay(80);
+    }
+
+    return null;
+  };
+
   const summarizeExtComponent = (component) => {
     const element = getExtComponentElement(component);
     return {
@@ -1265,6 +2187,7 @@
 
     const candidates = getExtComponents().filter((component) => {
       const summary = summarizeExtComponent(component);
+      const fieldLabel = normalizeVisibleText(summary.fieldLabel);
       const haystack = [
         summary.id,
         summary.xtype,
@@ -1284,7 +2207,7 @@
 
       const element = getExtComponentElement(component);
       const attachedToRow = Boolean(row && element && row.contains(element));
-      return attachedToRow || haystack.includes("task type");
+      return attachedToRow || fieldLabel === "task type" || haystack.includes("oryx-tasktype");
     });
 
     return candidates.find((component) => {
@@ -1315,6 +2238,430 @@
     } catch {}
 
     return false;
+  };
+
+  const getExtStoreRecords = (componentOrStore) => {
+    const store =
+      componentOrStore && typeof componentOrStore.getStore === "function"
+        ? componentOrStore.getStore()
+        : componentOrStore && componentOrStore.store
+          ? componentOrStore.store
+          : componentOrStore;
+
+    if (!store) {
+      return [];
+    }
+
+    try {
+      if (typeof store.getRange === "function") {
+        const range = store.getRange();
+        if (Array.isArray(range) && range.length > 0) {
+          return range.filter(Boolean);
+        }
+      }
+    } catch {}
+
+    try {
+      if (store.data) {
+        if (Array.isArray(store.data.items)) {
+          return store.data.items.filter(Boolean);
+        }
+
+        if (typeof store.data.each === "function") {
+          const items = [];
+          store.data.each((item) => {
+            if (item) {
+              items.push(item);
+            }
+          });
+          if (items.length > 0) {
+            return items;
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      if (Array.isArray(store.items)) {
+        return store.items.filter(Boolean);
+      }
+    } catch {}
+
+    return [];
+  };
+
+  const getExtRecordData = (record) => {
+    if (!record || typeof record !== "object") {
+      return null;
+    }
+
+    if (record.data && typeof record.data === "object") {
+      return record.data;
+    }
+
+    return null;
+  };
+
+  const getExtRecordPropId = (record) => {
+    const data = getExtRecordData(record);
+    const gridProperties =
+      (data && data.gridProperties && typeof data.gridProperties === "object" ? data.gridProperties : null) ||
+      (record && typeof record.get === "function" ? record.get("gridProperties") : null);
+
+    const propId =
+      (gridProperties && gridProperties.propId) ||
+      (data && (data.propId || data.propertyId || data.propertyName)) ||
+      "";
+
+    return String(propId || "");
+  };
+
+  const getExtRecordValue = (record) => {
+    const data = getExtRecordData(record);
+    const dataValue =
+      (data && (data.value ?? data.displayValue ?? data.rawValue ?? data.text)) ||
+      "";
+    if (dataValue !== "") {
+      return String(dataValue);
+    }
+
+    if (record && typeof record.get === "function") {
+      for (const key of ["value", "displayValue", "rawValue", "text"]) {
+        try {
+          const value = record.get(key);
+          if (value != null && value !== "") {
+            return String(value);
+          }
+        } catch {}
+      }
+    }
+
+    return "";
+  };
+
+  const setExtRecordValue = (record, value) => {
+    let changed = false;
+
+    try {
+      if (record && typeof record.beginEdit === "function") {
+        record.beginEdit();
+      }
+    } catch {}
+
+    try {
+      if (record && typeof record.set === "function") {
+        record.set("value", value);
+        changed = true;
+      }
+    } catch {}
+
+    try {
+      if (record && record.data && typeof record.data === "object") {
+        record.data.value = value;
+        changed = true;
+      }
+    } catch {}
+
+    try {
+      if (record && typeof record.endEdit === "function") {
+        record.endEdit();
+      }
+    } catch {}
+
+    try {
+      if (record && typeof record.commit === "function") {
+        record.commit();
+      }
+    } catch {}
+
+    return changed;
+  };
+
+  const getExtComponentLineage = (component) => {
+    const lineage = [];
+    const seen = new Set();
+    let current = component;
+    let depth = 0;
+
+    while (current && depth < 10 && !seen.has(current)) {
+      lineage.push(current);
+      seen.add(current);
+
+      let next = null;
+      for (const key of [
+        "ownerCt",
+        "ownerContainer",
+        "propertyWindow",
+        "grid",
+        "propertyGrid",
+        "editor",
+      ]) {
+        try {
+          if (current[key] && !seen.has(current[key])) {
+            next = current[key];
+            break;
+          }
+        } catch {}
+      }
+
+      current = next;
+      depth += 1;
+    }
+
+    return lineage;
+  };
+
+  const primeTaskTypePropertyContext = async () => {
+    const existingContext = findTaskTypePropertyContext();
+    if (existingContext) {
+      return true;
+    }
+
+    const wasExpanded = isEastPanelExpanded();
+    let primed = false;
+
+    for (let attempt = 0; attempt < 3 && !primed; attempt += 1) {
+      if (!isEastPanelExpanded()) {
+        await setEastPanelExpanded(true);
+      }
+      if (!isEastPanelExpanded()) {
+        await forceRightRailOpen();
+      }
+
+      await reselectCurrentShapeOnCanvas();
+
+      const rowBefore = await waitForTaskTypeRow(2500);
+      const extComponent = findTaskTypeExtComponent();
+      if (extComponent) {
+        try {
+          if (typeof extComponent.onTriggerClick === "function") {
+            extComponent.onTriggerClick();
+            await delay(140);
+          } else if (typeof extComponent.expand === "function") {
+            extComponent.expand();
+            await delay(140);
+          }
+        } catch {}
+
+        try {
+          if (typeof extComponent.collapse === "function") {
+            extComponent.collapse();
+          }
+        } catch {}
+      }
+
+      const rowParts = rowBefore || (await waitForTaskTypeRow(2500));
+      if (rowParts) {
+        const target = rowParts.valueCell instanceof Element ? rowParts.valueCell : rowParts.row;
+        target.focus?.();
+        dispatchMouseClick(target);
+        await delay(120);
+
+        const editorField = await activateTaskTypeEditor(rowParts);
+        if (editorField instanceof Element) {
+          dispatchKeyboard(editorField, "Escape");
+          editorField.blur?.();
+          await delay(80);
+        }
+      }
+
+      await delay(120);
+
+      const taskType = readTaskTypeFromDom();
+      const shapeId = getSelectionShapeId(getSelectedShapes(findEditorFacade()));
+      if (shapeId && taskType) {
+        rememberTaskType(shapeId, taskType);
+      }
+
+      primed = Boolean(findTaskTypePropertyContext() || taskType);
+    }
+
+    if (!wasExpanded && isEastPanelExpanded()) {
+      await setEastPanelExpanded(false);
+    }
+
+    return primed;
+  };
+
+  const findTaskTypePropertyContext = () => {
+    const rowParts = findTaskTypeRowElements();
+    const row = rowParts?.row || null;
+    const candidates = [];
+
+    for (const component of getExtComponents()) {
+      const records = getExtStoreRecords(component);
+      if (records.length === 0) {
+        continue;
+      }
+
+      const record = records.find((entry) => getExtRecordPropId(entry) === "oryx-tasktype");
+      if (!record) {
+        continue;
+      }
+
+      const lineage = getExtComponentLineage(component);
+      const handler =
+        lineage.find((entry) => typeof entry.afterEdit === "function") ||
+        null;
+      const grid =
+        lineage.find((entry) => typeof entry.fireEvent === "function" || typeof entry.getStore === "function") ||
+        component;
+      const facadeHolder =
+        lineage.find((entry) => entry && entry.facade && typeof entry.facade.executeCommands === "function") ||
+        lineage.find((entry) => typeof entry.executeCommands === "function") ||
+        null;
+      const facade =
+        facadeHolder && facadeHolder.facade && typeof facadeHolder.facade.executeCommands === "function"
+          ? facadeHolder.facade
+          : facadeHolder && typeof facadeHolder.executeCommands === "function"
+            ? facadeHolder
+            : null;
+      const element = getExtComponentElement(component);
+      const summary = summarizeExtComponent(component);
+
+      let score = 0;
+      if (handler) {
+        score += 240;
+      }
+      if (facade) {
+        score += 200;
+      }
+      if (element && isVisibleElement(element)) {
+        score += 80;
+      }
+      if (row && element && row.contains(element)) {
+        score += 120;
+      }
+      if (summary.fieldLabel && normalizeVisibleText(summary.fieldLabel) === "task type") {
+        score += 60;
+      }
+      if (
+        [summary.id, summary.xtype, summary.name, summary.hiddenName, summary.text]
+          .join(" ")
+          .toLowerCase()
+          .includes("oryx-tasktype")
+      ) {
+        score += 90;
+      }
+
+      candidates.push({
+        score,
+        component,
+        grid,
+        handler,
+        facade,
+        record,
+      });
+    }
+
+    candidates.sort((left, right) => right.score - left.score);
+    const best = candidates[0] || null;
+    if (best?.facade) {
+      lastResolvedFacade = best.facade;
+    }
+    return best;
+  };
+
+  const applyTaskTypeViaPropertyContext = (taskTypeLabel) => {
+    const context = findTaskTypePropertyContext();
+    if (!context) {
+      return { ok: false, tried: false, error: "Task type property context not found" };
+    }
+
+    const storedValue = taskTypeLabel === "None" ? "" : taskTypeLabel;
+    const oldValue = getExtRecordValue(context.record) || readTaskTypeFromDom() || "None";
+    const option = {
+      grid: context.grid || context.component || null,
+      record: context.record,
+      field: "value",
+      value: storedValue,
+      newValue: storedValue,
+      displayValue: taskTypeLabel,
+      rawValue: taskTypeLabel,
+      oldValue,
+      originalValue: oldValue,
+    };
+
+    let applied = false;
+
+    try {
+      if (
+        context.grid &&
+        context.grid.events &&
+        context.grid.events.afteredit &&
+        typeof context.grid.fireEvent === "function"
+      ) {
+        setExtRecordValue(context.record, storedValue);
+        context.grid.fireEvent("afteredit", option);
+        applied = true;
+      }
+    } catch {}
+
+    if (!applied) {
+      try {
+        if (context.handler && typeof context.handler.afterEdit === "function") {
+          setExtRecordValue(context.record, storedValue);
+          context.handler.afterEdit.call(context.handler, option);
+          applied = true;
+        }
+      } catch {}
+    }
+
+    if (!applied) {
+      try {
+        if (context.facade && typeof context.facade.executeCommands === "function") {
+          const selectedShapes = getSelectedShapes(context.facade).filter(
+            (shape) => supportsTaskTypeProperty(shape) || isTaskLikeShape(shape),
+          );
+          if (selectedShapes.length > 0) {
+            const oldValues = new Map(
+              selectedShapes.map((shape) => [shape, getShapeProperty(shape, "oryx-tasktype")]),
+            );
+            context.facade.executeCommands([
+              {
+                execute() {
+                  for (const shape of selectedShapes) {
+                    setShapeProperty(shape, "oryx-tasktype", storedValue);
+                  }
+                },
+                rollback() {
+                  for (const shape of selectedShapes) {
+                    setShapeProperty(shape, "oryx-tasktype", oldValues.get(shape) || "");
+                  }
+                },
+              },
+            ]);
+            refreshEditor(context.facade, selectedShapes);
+            applied = true;
+          }
+        }
+      } catch {}
+    }
+
+    if (applied) {
+      setExtRecordValue(context.record, storedValue);
+
+      if (context.facade) {
+        const selectedShapes = getSelectedShapes(context.facade);
+        for (const shape of selectedShapes) {
+          rememberTaskType(getObjectId(shape), taskTypeLabel);
+          if (taskTypeLabel === "None") {
+            setShapeProperty(shape, "oryx-tasktype", "");
+          }
+        }
+        refreshEditor(context.facade, selectedShapes);
+      }
+
+      try {
+        if (context.grid && typeof context.grid.getView === "function") {
+          context.grid.getView()?.refresh?.();
+        }
+      } catch {}
+
+      return { ok: true, tried: true };
+    }
+
+    return { ok: false, tried: true, error: "Task type property command failed" };
   };
 
   const commitEditorField = async (editorField, component, label) => {
@@ -1422,8 +2769,139 @@
     return null;
   };
 
+  const rectToPlainObject = (rect) => {
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    return {
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      left: rect.left,
+      width: rect.width,
+      height: rect.height,
+    };
+  };
+
+  const getElementRect = (element) => {
+    if (!(element instanceof Element)) {
+      return null;
+    }
+
+    const directRect = rectToPlainObject(element.getBoundingClientRect());
+    if (directRect) {
+      return directRect;
+    }
+
+    let minTop = Infinity;
+    let minLeft = Infinity;
+    let maxRight = -Infinity;
+    let maxBottom = -Infinity;
+
+    for (const node of element.querySelectorAll("*")) {
+      if (!(node instanceof Element)) {
+        continue;
+      }
+
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
+
+      minTop = Math.min(minTop, rect.top);
+      minLeft = Math.min(minLeft, rect.left);
+      maxRight = Math.max(maxRight, rect.right);
+      maxBottom = Math.max(maxBottom, rect.bottom);
+    }
+
+    if (!Number.isFinite(minTop) || !Number.isFinite(minLeft)) {
+      return null;
+    }
+
+    return {
+      top: minTop,
+      right: maxRight,
+      bottom: maxBottom,
+      left: minLeft,
+      width: maxRight - minLeft,
+      height: maxBottom - minTop,
+    };
+  };
+
+  const findShapeAnchorElement = (shapeId) => {
+    const normalizedId = extractShapeId(shapeId);
+    const escape = window.CSS && typeof window.CSS.escape === "function"
+      ? window.CSS.escape.bind(window.CSS)
+      : (value) => String(value || "");
+
+    const selectorCandidates = normalizedId
+      ? [
+          `#${escape(normalizedId)}`,
+          `[data-resource-id="${escape(normalizedId)}"]`,
+          `[resource-id="${escape(normalizedId)}"]`,
+          `[data-shape-id="${escape(normalizedId)}"]`,
+          `[id^="${escape(normalizedId)}"]`,
+        ]
+      : [];
+
+    for (const selector of selectorCandidates) {
+      let nodes = [];
+      try {
+        nodes = Array.from(document.querySelectorAll(selector));
+      } catch {
+        nodes = [];
+      }
+
+      for (const node of nodes) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+
+        const candidate =
+          node.closest("g[id], [data-resource-id], [resource-id], [data-shape-id]") || node;
+        if (candidate instanceof Element && getElementRect(candidate)) {
+          return candidate;
+        }
+      }
+    }
+
+    if (lastPointerTarget instanceof Element) {
+      const pointerCandidate =
+        lastPointerTarget.closest("g[id], [data-resource-id], [resource-id], [data-shape-id]") ||
+        lastPointerTarget;
+      if (getElementRect(pointerCandidate)) {
+        return pointerCandidate;
+      }
+    }
+
+    return null;
+  };
+
+  const getSelectionAnchorRect = (selectedShapes) => {
+    const firstShape = selectedShapes[0] || null;
+    const firstShapeId = firstShape ? getObjectId(firstShape) : "";
+    const shapeElement = findShapeAnchorElement(firstShapeId || getPointerShapeId());
+    if (shapeElement) {
+      return getElementRect(shapeElement);
+    }
+
+    const taskTypeRow = findTaskTypeRowElements()?.row || null;
+    if (taskTypeRow instanceof Element) {
+      return getElementRect(taskTypeRow);
+    }
+
+    return null;
+  };
+
   const applyTaskTypeActionDom = async (taskType) => {
     const targetLabel = getTaskTypeOptionLabel(taskType);
+    const propertyContextResult = applyTaskTypeViaPropertyContext(targetLabel);
+    if (propertyContextResult.ok) {
+      await delay(20);
+      return { ok: true };
+    }
+
     const extComponent = findTaskTypeExtComponent();
     if (extComponent && setExtComboValue(extComponent, targetLabel)) {
       await delay(20);
@@ -1435,8 +2913,32 @@
       return { ok: false, error: "Task type row not found" };
     }
 
+    const existingTrigger =
+      rowParts.row.querySelector(".x-form-arrow-trigger, .x-form-trigger, [class*='trigger']") ||
+      rowParts.valueCell.querySelector(".x-form-arrow-trigger, .x-form-trigger, [class*='trigger']");
+    if (existingTrigger) {
+      dispatchMouseClick(existingTrigger);
+      await delay(40);
+      const directOption = findVisibleOptionElement(targetLabel);
+      if (directOption) {
+        dispatchMouseClick(directOption);
+        await delay(40);
+        return { ok: true };
+      }
+    }
+
     const editorField = await activateTaskTypeEditor(rowParts);
     const activeComponent = editorField instanceof Element ? getExtCmp(editorField.id || "") : null;
+
+    const afterActivationContextResult = applyTaskTypeViaPropertyContext(targetLabel);
+    if (afterActivationContextResult.ok) {
+      if (editorField instanceof Element) {
+        dispatchKeyboard(editorField, "Escape");
+        editorField.blur?.();
+      }
+      await delay(20);
+      return { ok: true };
+    }
 
     if (editorField && (await commitEditorField(editorField, activeComponent, targetLabel))) {
       await delay(40);
@@ -1444,8 +2946,7 @@
     }
 
     const localTrigger =
-      rowParts.row.querySelector(".x-form-arrow-trigger, .x-form-trigger, [class*='trigger']") ||
-      rowParts.valueCell.querySelector(".x-form-arrow-trigger, .x-form-trigger, [class*='trigger']") ||
+      existingTrigger ||
       (editorField instanceof Element
         ? editorField.parentElement?.querySelector(".x-form-arrow-trigger, .x-form-trigger, [class*='trigger']")
         : null);
@@ -1529,24 +3030,38 @@
   };
 
   const refreshEditor = (facade, selectedShapes) => {
+    const resolvedFacade = facade || lastResolvedFacade;
+
     for (const shape of selectedShapes) {
       try {
         if (typeof shape.refresh === "function") {
           shape.refresh();
         }
       } catch {}
+
+      try {
+        const shapeCanvas =
+          (typeof shape.getCanvas === "function" && shape.getCanvas()) ||
+          shape.canvas ||
+          shape.parent ||
+          null;
+        if (shapeCanvas && typeof shapeCanvas.update === "function") {
+          shapeCanvas.update();
+        }
+      } catch {}
     }
 
     try {
-      const canvas = facade && typeof facade.getCanvas === "function" ? facade.getCanvas() : null;
+      const canvas =
+        resolvedFacade && typeof resolvedFacade.getCanvas === "function" ? resolvedFacade.getCanvas() : null;
       if (canvas && typeof canvas.update === "function") {
         canvas.update();
       }
     } catch {}
 
     try {
-      if (facade && typeof facade.updateSelection === "function") {
-        facade.updateSelection();
+      if (resolvedFacade && typeof resolvedFacade.updateSelection === "function") {
+        resolvedFacade.updateSelection();
       }
     } catch {}
 
@@ -1555,12 +3070,12 @@
       if (
         cfg &&
         cfg.EVENT_SELECTION_CHANGED &&
-        facade &&
-        typeof facade.raiseEvent === "function"
+        resolvedFacade &&
+        typeof resolvedFacade.raiseEvent === "function"
       ) {
-        facade.raiseEvent({
+        resolvedFacade.raiseEvent({
           type: cfg.EVENT_SELECTION_CHANGED,
-          elements: getFacadeSelection(facade),
+          elements: getFacadeSelection(resolvedFacade),
         });
       }
     } catch {}
@@ -1584,10 +3099,14 @@
         selectedCount: 0,
         isTask: false,
         taskType: null,
+        shapeId: null,
+        anchorRect: null,
       };
     }
     const firstShape = selectedShapes[0] || null;
-    const isTask = firstShape ? isTaskLikeShape(firstShape) : domTaskContext;
+    const shapeId = getSelectionShapeId(selectedShapes);
+    const cachedTaskType = getCachedTaskType(shapeId);
+    const isTask = firstShape ? supportsTaskTypeProperty(firstShape) || isTaskLikeShape(firstShape) : domTaskContext || Boolean(cachedTaskType);
     let taskType = null;
 
     if (isTask && firstShape) {
@@ -1601,8 +3120,20 @@
       }
     }
 
+    if (!taskType && cachedTaskType) {
+      taskType = cachedTaskType;
+    }
+
     if (!taskType && isTask) {
       taskType = readTaskTypeFromDom();
+    }
+
+    if (!taskType && isTask) {
+      taskType = "none";
+    }
+
+    if (shapeId && taskType) {
+      rememberTaskType(shapeId, taskType);
     }
 
     return {
@@ -1610,6 +3141,53 @@
       selectedCount: selectedShapes.length > 0 ? selectedShapes.length : pointerSelection || domTaskContext ? 1 : 0,
       isTask,
       taskType,
+      shapeId,
+      anchorRect: getSelectionAnchorRect(selectedShapes),
+    };
+  };
+
+  const querySelectionInfoAsync = async () => {
+    return querySelectionInfo();
+  };
+
+  const getBootstrapSnapshot = () => {
+    const facade = findEditorFacade();
+    const selection = facade ? getSelectedShapes(facade) : [];
+    const shapeId = getSelectionShapeId(selection);
+    const rowParts = findTaskTypeRowElements();
+    const extComponent = findTaskTypeExtComponent();
+    const propertyContext = findTaskTypePropertyContext();
+
+    return {
+      eastPanelExpanded: isEastPanelExpanded(),
+      pointerShapeId: getPointerShapeId(),
+      selectionShapeId: shapeId,
+      currentTaskType: shapeId ? getCachedTaskType(shapeId) : null,
+      attributesToggle: summarizeElement(findAttributesToggleElement()),
+      rightRailToggles: findRightRailToggleCandidates()
+        .slice(0, 6)
+        .map((candidate) => summarizeElement(candidate)),
+      taskTypeRowFound: Boolean(rowParts),
+      taskTypeRow: rowParts
+        ? {
+            label: summarizeElement(rowParts.labelNode),
+            row: summarizeElement(rowParts.row),
+            valueCell: summarizeElement(rowParts.valueCell),
+          }
+        : null,
+      taskTypeExtComponent: extComponent ? summarizeExtComponent(extComponent) : null,
+      taskTypePropertyContext: propertyContext
+        ? {
+            grid: summarizeExtComponent(propertyContext.grid),
+            component: summarizeExtComponent(propertyContext.component),
+            recordPropId: getExtRecordPropId(propertyContext.record),
+            recordValue: getExtRecordValue(propertyContext.record),
+            hasAfterEdit: Boolean(propertyContext.handler && typeof propertyContext.handler.afterEdit === "function"),
+            hasFacade: Boolean(propertyContext.facade),
+          }
+        : null,
+      selectionInfo: querySelectionInfo(),
+      editorReady: getEditorReadySnapshot(),
     };
   };
 
@@ -1941,6 +3519,44 @@
       .slice(0, 80);
   };
 
+  window.__bpkeysTaskTypePropertyContext = () => {
+    const context = findTaskTypePropertyContext();
+    if (!context) {
+      return { found: false };
+    }
+
+    return {
+      found: true,
+      recordPropId: getExtRecordPropId(context.record),
+      recordValue: getExtRecordValue(context.record),
+      grid: summarizeExtComponent(context.grid),
+      component: summarizeExtComponent(context.component),
+      handler: context.handler
+        ? {
+            id: context.handler.id || "",
+            xtype: context.handler.xtype || "",
+            hasAfterEdit: typeof context.handler.afterEdit === "function",
+            hasFacade:
+              Boolean(context.handler.facade) ||
+              typeof context.handler.executeCommands === "function",
+          }
+        : null,
+      facadeFound: Boolean(context.facade),
+    };
+  };
+
+  window.__bpkeysBootstrapDebug = async () => {
+    const before = getBootstrapSnapshot();
+    const primed = await primeTaskTypePropertyContext();
+    const after = getBootstrapSnapshot();
+
+    return {
+      primed,
+      before,
+      after,
+    };
+  };
+
   window.__bpkeysTaskTypeRowDebug = () => {
     const rowParts = findTaskTypeRowElements();
     const ext = window.Ext;
@@ -2028,7 +3644,7 @@
     };
   };
 
-  const applyTaskTypeAction = async (taskType) => {
+  const applyTaskTypeAction = async (taskType, preferredShapeId) => {
     const normalizedType = normalizeTaskType(taskType);
     if (!normalizedType || !TASK_TYPE_VALUES[normalizedType]) {
       return { ok: false, error: "Unsupported task type" };
@@ -2036,11 +3652,18 @@
 
     const facade = findEditorFacade();
     const selectedShapesFromFacade = facade ? getSelectedShapes(facade) : [];
-    const pointerShape = selectedShapesFromFacade.length === 0 ? getPointerSelectedShape() : null;
+    const preferredShape =
+      selectedShapesFromFacade.length === 0 && preferredShapeId
+        ? resolveShapeById(preferredShapeId)
+        : null;
+    const pointerShape =
+      selectedShapesFromFacade.length === 0 && !preferredShape ? getPointerSelectedShape() : null;
     const selectedShapes = selectedShapesFromFacade.length > 0
       ? selectedShapesFromFacade
-      : pointerShape
-        ? [pointerShape]
+      : preferredShape
+        ? [preferredShape]
+        : pointerShape
+          ? [pointerShape]
         : [];
     const pointerSelection = hasPointerSelection();
     const domTaskContext = isDomTaskContext();
@@ -2049,23 +3672,29 @@
       return { ok: false, error: "No element selected" };
     }
 
-    const taskShapes = selectedShapes.filter(isTaskLikeShape);
+    const taskShapes = selectedShapes.filter((shape) => supportsTaskTypeProperty(shape) || isTaskLikeShape(shape));
     if (taskShapes.length === 0 && !domTaskContext) {
       return { ok: false, error: "Selected element is not a task" };
     }
 
-    let changed = false;
-    for (const shape of taskShapes) {
-      for (const key of TASK_TYPE_KEYS) {
-        for (const value of TASK_TYPE_VALUES[normalizedType]) {
-          changed = setShapeProperty(shape, key, value) || changed;
-        }
+    if (taskShapes.length > 0) {
+      const targetValue = getDirectTaskTypeValue(normalizedType);
+      let changed = false;
+      for (const shape of taskShapes) {
+        changed = setShapeProperty(shape, "oryx-tasktype", targetValue) || changed;
+        rememberTaskType(getObjectId(shape), normalizedType);
       }
+
+      if (changed) {
+        refreshEditor(facade, selectedShapes);
+        return { ok: true };
+      }
+
+      return { ok: false, error: "Direct task update failed" };
     }
 
-    if (changed && facade) {
-      refreshEditor(facade, selectedShapes);
-      return { ok: true };
+    if (!domTaskContext) {
+      return { ok: false, error: "Task model not found" };
     }
 
     return applyTaskTypeActionDom(normalizedType);
@@ -2146,6 +3775,24 @@
     "pointerdown",
     (event) => {
       lastPointerTarget = event.target instanceof Element ? event.target : null;
+      const shapeId = extractShapeIdFromEvent(event);
+      if (shapeId) {
+        lastPointerShapeId = shapeId;
+        lastShapePointerTarget = event.target instanceof Element ? event.target : null;
+        cachePointerShapeBinding(shapeId, lastShapePointerTarget);
+        return;
+      }
+
+      const target = event.target instanceof Element ? event.target : null;
+      const clickedCanvas =
+        Boolean(target?.closest("svg")) ||
+        Boolean(target?.closest("#oryx_canvas")) ||
+        Boolean(target?.closest("[id*='canvas']"));
+      if (clickedCanvas) {
+        lastPointerShapeId = "";
+        lastShapePointerTarget = null;
+        lastResolvedShapeObject = null;
+      }
     },
     true,
   );
@@ -2208,6 +3855,72 @@
         data.payload.namespace,
         data.payload.requestTemplate,
       );
+      return;
+    }
+
+    if (
+      data.type === "editor-query-request" &&
+      typeof data.requestId === "string" &&
+      data.query === "selection-info"
+    ) {
+      void Promise.resolve(querySelectionInfoAsync())
+        .then((result) => {
+          window.postMessage(
+            {
+              source: MESSAGE_SOURCE,
+              type: "editor-query-result",
+              requestId: data.requestId,
+              ok: true,
+              result,
+            },
+            window.location.origin,
+          );
+        })
+        .catch((error) => {
+          window.postMessage(
+            {
+              source: MESSAGE_SOURCE,
+              type: "editor-query-result",
+              requestId: data.requestId,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            window.location.origin,
+          );
+        });
+      return;
+    }
+
+    if (
+      data.type === "editor-action-request" &&
+      typeof data.requestId === "string" &&
+      data.action === "set-task-type"
+    ) {
+      void Promise.resolve(applyTaskTypeAction(data.taskType, data.shapeId))
+        .then((result) => {
+          window.postMessage(
+            {
+              source: MESSAGE_SOURCE,
+              type: "editor-action-result",
+              requestId: data.requestId,
+              ok: true,
+              result,
+            },
+            window.location.origin,
+          );
+        })
+        .catch((error) => {
+          window.postMessage(
+            {
+              source: MESSAGE_SOURCE,
+              type: "editor-action-result",
+              requestId: data.requestId,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            window.location.origin,
+          );
+        });
       return;
     }
 

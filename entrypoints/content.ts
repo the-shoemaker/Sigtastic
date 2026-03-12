@@ -13,11 +13,18 @@ import {
   type ClipboardWriteResultMessage,
 } from "../src/content/signavio-clipboard";
 import { FavoritesOverlay } from "../src/content/overlay";
-import type { ClipboardCapture, ContentMessage } from "../src/shared/types";
+import { QuickTypeMenu } from "../src/content/quick-menu";
+import type {
+  ClipboardCapture,
+  ContentMessage,
+  EditorSelectionInfo,
+  TaskTypeOption,
+} from "../src/shared/types";
 import { getPrimaryShapeInfo, getSuggestedFavoriteName } from "../src/shared/payload";
 
 const MESSAGE_SOURCE = "signavio-bpkeys-hook";
 let overlay: FavoritesOverlay | null = null;
+let quickMenu: QuickTypeMenu | null = null;
 
 const pendingClipboardWrites = new Map<
   string,
@@ -27,6 +34,16 @@ const pendingClipboardWrites = new Map<
     timer: number;
   }
 >();
+
+const pendingEditorRequests = new Map<
+  string,
+  {
+    resolve: (value: unknown) => void;
+    reject: (reason?: unknown) => void;
+    timer: number;
+  }
+>();
+const lastKnownTaskTypes = new Map<string, TaskTypeOption>();
 
 const toast = (() => {
   let node: HTMLDivElement | null = null;
@@ -250,6 +267,25 @@ const isClipboardCapture = (value: unknown): value is ClipboardCapture => {
   );
 };
 
+const createRequestId = (prefix: string): string => {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const isEditorSelectionInfo = (value: unknown): value is EditorSelectionInfo => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.hasSelection === "boolean" &&
+    typeof candidate.selectedCount === "number" &&
+    typeof candidate.isTask === "boolean" &&
+    (candidate.taskType === null || typeof candidate.taskType === "string") &&
+    (candidate.shapeId === null || typeof candidate.shapeId === "string")
+  );
+};
+
 const injectClipboardHook = () => {
   if (document.getElementById("bpkeys-clipboard-hook")) {
     return;
@@ -280,6 +316,117 @@ const resolvePendingWrite = (data: ClipboardWriteResultMessage): void => {
   }
 
   pending.reject(new Error(data.error || `Clipboard write failed (${data.status ?? "unknown"})`));
+};
+
+const resolvePendingEditorRequest = (
+  data: Record<string, unknown>,
+  expectedType: "editor-query-result" | "editor-action-result",
+): void => {
+  if (data.type !== expectedType || typeof data.requestId !== "string") {
+    return;
+  }
+
+  const pending = pendingEditorRequests.get(data.requestId);
+  if (!pending) {
+    return;
+  }
+
+  window.clearTimeout(pending.timer);
+  pendingEditorRequests.delete(data.requestId);
+
+  if (data.ok === false) {
+    pending.reject(new Error(typeof data.error === "string" ? data.error : "Editor bridge request failed"));
+    return;
+  }
+
+  pending.resolve(data.result);
+};
+
+const requestEditorQuery = async (): Promise<EditorSelectionInfo> => {
+  const requestId = createRequestId("editor-query");
+  const result = await new Promise<unknown>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingEditorRequests.delete(requestId);
+      reject(new Error("Timed out waiting for editor selection info"));
+    }, 20000);
+
+    pendingEditorRequests.set(requestId, { resolve, reject, timer });
+    window.postMessage(
+      {
+        source: CLIPBOARD_CONTENT_SOURCE,
+        type: "editor-query-request",
+        requestId,
+        query: "selection-info",
+      },
+      window.location.origin,
+    );
+  });
+
+  if (!isEditorSelectionInfo(result)) {
+    throw new Error("Editor selection response was invalid");
+  }
+
+  const cachedTaskType =
+    result.shapeId && lastKnownTaskTypes.has(result.shapeId)
+      ? (lastKnownTaskTypes.get(result.shapeId) ?? null)
+      : null;
+
+  if (result.shapeId && result.taskType) {
+    lastKnownTaskTypes.set(result.shapeId, result.taskType);
+  }
+
+  if (cachedTaskType && result.isTask && (result.taskType === null || result.taskType === "none")) {
+    return {
+      ...result,
+      taskType: cachedTaskType,
+    };
+  }
+
+  if (result.isTask && result.taskType === null) {
+    return {
+      ...result,
+      taskType: "none",
+    };
+  }
+
+  return result;
+};
+
+const requestTaskTypeApply = async (
+  taskType: TaskTypeOption,
+  shapeId: string | null,
+): Promise<{ ok: boolean; error?: string }> => {
+  const requestId = createRequestId("editor-action");
+  const result = await new Promise<unknown>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingEditorRequests.delete(requestId);
+      reject(new Error("Timed out waiting for task type update"));
+    }, 20000);
+
+    pendingEditorRequests.set(requestId, { resolve, reject, timer });
+    window.postMessage(
+      {
+        source: CLIPBOARD_CONTENT_SOURCE,
+        type: "editor-action-request",
+        requestId,
+        action: "set-task-type",
+        taskType,
+        shapeId,
+      },
+      window.location.origin,
+    );
+  });
+
+  if (typeof result !== "object" || result === null || typeof (result as { ok?: unknown }).ok !== "boolean") {
+    throw new Error("Editor action response was invalid");
+  }
+
+  const typedResult = result as { ok: boolean; error?: string };
+  if (typedResult.ok && shapeId) {
+    lastKnownTaskTypes.set(shapeId, taskType);
+  }
+
+  return typedResult;
 };
 
 const writeFavoriteToClipboard = async (favorite: {
@@ -354,6 +501,51 @@ const ensureOverlay = (): FavoritesOverlay => {
   return overlay;
 };
 
+const getTaskTypeLabel = (taskType: TaskTypeOption): string => {
+  const labels: Record<TaskTypeOption, string> = {
+    none: "None",
+    send: "Send",
+    receive: "Receive",
+    script: "Script",
+    service: "Service",
+    user: "User",
+    manual: "Manual",
+    "business-rule": "Business Rule",
+  };
+
+  return labels[taskType];
+};
+
+const ensureQuickMenu = (): QuickTypeMenu => {
+  if (quickMenu) {
+    return quickMenu;
+  }
+
+  quickMenu = new QuickTypeMenu({
+    onApply: async (taskType) => {
+      try {
+        const result = await requestTaskTypeApply(taskType, quickMenu?.getShapeId() ?? null);
+        if (!result.ok) {
+          toast(result.error || "Unable to change task type.");
+          return false;
+        }
+
+        toast(`Changed task type to ${getTaskTypeLabel(taskType)}.`);
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toast(`Task type change failed: ${message.slice(0, 120)}`);
+        return false;
+      }
+    },
+    onClose: () => {
+      // Intentionally empty; close state is managed inside the menu.
+    },
+  });
+
+  return quickMenu;
+};
+
 const handleSaveFavorite = async () => {
   const latestCapture = await getLatestCapture();
   if (!latestCapture) {
@@ -392,9 +584,51 @@ const handleSaveFavorite = async () => {
 };
 
 const handleToggleOverlay = async () => {
+  if (quickMenu?.isOpen()) {
+    quickMenu.close();
+  }
+
   const favorites = await getFavorites();
   const instance = ensureOverlay();
   instance.toggle(favorites);
+};
+
+const handleToggleQuickMenu = async () => {
+  if (overlay?.isOpen()) {
+    overlay.close();
+  }
+
+  const instance = ensureQuickMenu();
+  if (instance.isOpen()) {
+    instance.close();
+    return;
+  }
+
+  let selection: EditorSelectionInfo;
+  try {
+    selection = await requestEditorQuery();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toast(`Unable to inspect selection: ${message.slice(0, 120)}`);
+    return;
+  }
+
+  if (!selection.hasSelection) {
+    toast("Select a task first.");
+    return;
+  }
+
+  if (selection.selectedCount > 1) {
+    toast("Select a single task for quick type change.");
+    return;
+  }
+
+  if (!selection.isTask) {
+    toast("Quick type menu works on task elements only.");
+    return;
+  }
+
+  instance.open(selection);
 };
 
 const handleBackgroundMessage = async (message: ContentMessage) => {
@@ -405,6 +639,11 @@ const handleBackgroundMessage = async (message: ContentMessage) => {
 
   if (message.type === "BPKEYS_TOGGLE_OVERLAY") {
     await handleToggleOverlay();
+    return;
+  }
+
+  if (message.type === "BPKEYS_TOGGLE_QUICK_MENU") {
+    await handleToggleQuickMenu();
   }
 };
 
@@ -453,6 +692,14 @@ export default defineContentScript({
 
       if (data.type === "clipboard-write-result" && isClipboardWriteResultMessage(data)) {
         resolvePendingWrite(data);
+        return;
+      }
+
+      if (data.type === "editor-query-result" || data.type === "editor-action-result") {
+        resolvePendingEditorRequest(
+          data,
+          data.type === "editor-query-result" ? "editor-query-result" : "editor-action-result",
+        );
       }
     });
 

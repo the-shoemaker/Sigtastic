@@ -28,6 +28,13 @@ export default defineConfig({
         },
         description: "Save latest copied snippet as favorite",
       },
+      "toggle-quick-menu": {
+        suggested_key: {
+          default: "Alt+Shift+E",
+          mac: "Alt+Shift+E",
+        },
+        description: "Open Signavio quick task type menu",
+      },
     },
     web_accessible_resources: [
       {

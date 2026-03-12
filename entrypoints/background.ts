@@ -3,6 +3,7 @@ import type { ContentMessage } from "../src/shared/types";
 const COMMAND_TO_MESSAGE: Record<string, ContentMessage["type"]> = {
   "toggle-overlay": "BPKEYS_TOGGLE_OVERLAY",
   "save-favorite": "BPKEYS_SAVE_FAVORITE",
+  "toggle-quick-menu": "BPKEYS_TOGGLE_QUICK_MENU",
 };
 
 const isSignavioUrl = (url: string | undefined): boolean => {

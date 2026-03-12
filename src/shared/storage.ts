@@ -2,11 +2,20 @@ import type { ClipboardCapture, Favorite } from "./types";
 import { preparePayloadForFavoriteStorage } from "./payload";
 
 const FAVORITES_KEY = "favorites";
+const FAVORITES_BACKUPS_KEY = "favoritesBackups";
 const LAST_CAPTURE_KEY = "lastCapture";
+const FAVORITES_MIRROR_KEY = "bpkeys.favorites.mirror.v1";
+const MAX_FAVORITES_BACKUPS = 6;
 
 type StorageShape = {
   favorites?: Favorite[];
+  favoritesBackups?: FavoriteBackup[];
   lastCapture?: ClipboardCapture;
+};
+
+type FavoriteBackup = {
+  savedAt: number;
+  favorites: Favorite[];
 };
 
 const clone = <T>(value: T): T => structuredClone(value);
@@ -74,18 +83,200 @@ const normalizeFavorites = (favorites: Favorite[]): Favorite[] => {
   }));
 };
 
+const isFavorite = (value: unknown): value is Favorite => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<Favorite>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    "payload" in candidate &&
+    typeof candidate.namespace === "string" &&
+    typeof candidate.order === "number" &&
+    typeof candidate.createdAt === "number" &&
+    typeof candidate.updatedAt === "number"
+  );
+};
+
+const parseFavoritesArray = (value: unknown): Favorite[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(isFavorite).map((favorite) => clone(favorite));
+};
+
+const parseFavoriteBackups = (value: unknown): FavoriteBackup[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const candidate = entry as Partial<FavoriteBackup>;
+      if (typeof candidate.savedAt !== "number") {
+        return null;
+      }
+
+      const favorites = parseFavoritesArray(candidate.favorites);
+      if (favorites.length === 0) {
+        return null;
+      }
+
+      return {
+        savedAt: candidate.savedAt,
+        favorites,
+      } satisfies FavoriteBackup;
+    })
+    .filter((entry): entry is FavoriteBackup => Boolean(entry))
+    .sort((left, right) => right.savedAt - left.savedAt);
+};
+
+const getMirrorStorage = (): Storage | null => {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return window.localStorage;
+    }
+  } catch {}
+
+  return null;
+};
+
+const readMirroredFavorites = (): Favorite[] => {
+  const storage = getMirrorStorage();
+  if (!storage) {
+    return [];
+  }
+
+  try {
+    const raw = storage.getItem(FAVORITES_MIRROR_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as { favorites?: unknown };
+    return parseFavoritesArray(parsed?.favorites);
+  } catch {
+    return [];
+  }
+};
+
+const writeMirroredFavorites = (favorites: Favorite[]): void => {
+  const storage = getMirrorStorage();
+  if (!storage) {
+    return;
+  }
+
+  try {
+    if (favorites.length === 0) {
+      storage.removeItem(FAVORITES_MIRROR_KEY);
+      return;
+    }
+
+    storage.setItem(
+      FAVORITES_MIRROR_KEY,
+      JSON.stringify({
+        savedAt: Date.now(),
+        favorites,
+      }),
+    );
+  } catch {
+    // Ignore mirror write failures; primary storage remains the source of truth.
+  }
+};
+
+const readFavoriteSources = async (): Promise<{
+  primary: Favorite[];
+  backups: FavoriteBackup[];
+  mirrored: Favorite[];
+}> => {
+  const data = (await browser.storage.local.get([FAVORITES_KEY, FAVORITES_BACKUPS_KEY])) as StorageShape;
+  return {
+    primary: parseFavoritesArray(data.favorites),
+    backups: parseFavoriteBackups(data.favoritesBackups),
+    mirrored: readMirroredFavorites(),
+  };
+};
+
+const chooseBestFavoriteRecovery = (sources: {
+  primary: Favorite[];
+  backups: FavoriteBackup[];
+  mirrored: Favorite[];
+}): Favorite[] => {
+  if (sources.primary.length > 0) {
+    return sources.primary;
+  }
+
+  if (sources.backups.length > 0) {
+    return sources.backups[0]!.favorites;
+  }
+
+  if (sources.mirrored.length > 0) {
+    return sources.mirrored;
+  }
+
+  return [];
+};
+
+const persistFavoritesState = async (favorites: Favorite[]): Promise<void> => {
+  const normalized = normalizeFavorites(favorites);
+  const current = await readFavoriteSources();
+  const backups = normalized.length > 0
+    ? [
+        {
+          savedAt: Date.now(),
+          favorites: normalized,
+        },
+        ...current.backups.filter((entry) => JSON.stringify(entry.favorites) !== JSON.stringify(normalized)),
+      ].slice(0, MAX_FAVORITES_BACKUPS)
+    : current.backups;
+
+  await browser.storage.local.set({
+    [FAVORITES_KEY]: normalized,
+    [FAVORITES_BACKUPS_KEY]: backups,
+  });
+
+  writeMirroredFavorites(normalized);
+};
+
 export async function getFavorites(): Promise<Favorite[]> {
-  const data = (await browser.storage.local.get(FAVORITES_KEY)) as StorageShape;
-  const favorites = Array.isArray(data.favorites) ? data.favorites : [];
-  return normalizeFavorites(favorites);
+  const sources = await readFavoriteSources();
+  const recovered = chooseBestFavoriteRecovery(sources);
+  const normalized = normalizeFavorites(recovered);
+
+  const needsRestore =
+    sources.primary.length === 0 &&
+    normalized.length > 0;
+
+  if (needsRestore) {
+    await persistFavoritesState(normalized);
+  }
+
+  return normalized;
 }
 
-export async function setFavorites(favorites: Favorite[]): Promise<Favorite[]> {
+export async function setFavorites(
+  favorites: Favorite[],
+  options?: { allowEmpty?: boolean },
+): Promise<Favorite[]> {
   const normalized = favorites.map((favorite, index) => ({
     ...favorite,
     order: index,
   }));
-  await browser.storage.local.set({ [FAVORITES_KEY]: normalized });
+
+  if (normalized.length === 0 && !options?.allowEmpty) {
+    const sources = await readFavoriteSources();
+    const recovered = chooseBestFavoriteRecovery(sources);
+    return normalizeFavorites(recovered);
+  }
+
+  await persistFavoritesState(normalized);
   return normalized;
 }
 
@@ -159,7 +350,7 @@ export async function deleteFavorite(id: string): Promise<Favorite[]> {
     return favorites;
   }
 
-  return setFavorites(filtered);
+  return setFavorites(filtered, { allowEmpty: true });
 }
 
 export async function moveFavorite(
