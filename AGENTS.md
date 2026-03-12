@@ -113,6 +113,16 @@ This file records odd/tricky implementation details for future agents.
 - Arrow-key selection now auto-scrolls the list when out of view: selected card moves to top with 10px padding (smooth scroll).
 - Small-screen content clipping fix: media-query card heights are now `auto` with `grid-template-rows: auto auto` to preserve label space.
 - Reorder (`Option+Up/Down`) now also triggers the same out-of-view follow-scroll behavior as arrow navigation.
+- Added quick-edit shortcut `Option+Shift+E` with keyboard-driven mini menu (arrow navigation + Enter).
+- Page hook now exposes editor query/action bridge via `postMessage`:
+  - `editor-query-request` / `editor-query-result`
+  - `editor-action-request` / `editor-action-result`
+- Task type change uses best-effort direct task property mutation (`oryx-tasktype` + fallbacks) and canvas refresh.
+- Duplicate action uses best-effort editor hooks (`ORYX.CONFIG.EVENT_COPY` / `EVENT_PASTE`) with `facade.copy`/`facade.paste` fallback.
+- Quick-edit selection detection was widened:
+  - supports selection from getter or state fields (`selection`, `currentSelection`, etc.)
+  - shallow recursive scan through likely facade/editor containers
+- Debug helper exposed in page context: `window.__bpkeysQuickEditDebug()`
 
 ## Search Behavior
 
@@ -140,3 +150,25 @@ This file records odd/tricky implementation details for future agents.
 1. Re-test persisted favorites after browser restart
 2. If `/p/clipboard` 401 reappears, compare latest successful native copy request headers/body with extension write request
 3. Extend icon mapping when encountering unknown stencil ids in real models
+
+## Quick Edit Notes
+
+- `Option+Shift+E` quick edit cannot rely on hidden Signavio/Oryx selection/runtime objects on this tenant.
+- Working assumption now:
+  - selected BPMN node is tracked from the last pointer target (`sid-*` SVG group/id)
+  - task context is inferred from the visible property panel (`#property-window-header-title`, `Task type` row)
+  - task type changes should use the visible ExtJS property-row DOM, not hidden model mutation hooks
+- `public/clipboard-hook.js` now falls back to DOM-driven task-type changes via `applyTaskTypeActionDom()` and treats pointer/property-panel context as valid selection for quick edit.
+- If quick edit regresses again, inspect the live property row/options first with:
+  - `window.__bpkeysVisibleActionables()`
+  - `window.__bpkeysTaskTypeDom()`
+
+## Quick Edit Removal
+
+- `Option+Shift+E` quick edit has been removed for now.
+- Removed end-to-end:
+  - manifest command registration
+  - background command routing
+  - content-script quick-edit UI / pending action plumbing
+  - active page-bridge handlers for `editor-query-request` and `editor-action-request`
+- Remaining quick-edit debug helpers may still exist in `public/clipboard-hook.js`, but they are inactive because no command/message path reaches them.

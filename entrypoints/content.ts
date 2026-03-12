@@ -18,6 +18,7 @@ import { getPrimaryShapeInfo, getSuggestedFavoriteName } from "../src/shared/pay
 
 const MESSAGE_SOURCE = "signavio-bpkeys-hook";
 let overlay: FavoritesOverlay | null = null;
+
 const pendingClipboardWrites = new Map<
   string,
   {
@@ -318,6 +319,7 @@ const writeFavoriteToClipboard = async (favorite: {
     });
   }
 };
+
 
 const ensureOverlay = (): FavoritesOverlay => {
   if (overlay) {
