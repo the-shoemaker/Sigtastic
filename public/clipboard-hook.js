@@ -3894,9 +3894,21 @@
     if (
       data.type === "editor-action-request" &&
       typeof data.requestId === "string" &&
-      data.action === "set-task-type"
+      (data.action === "set-task-type" || data.action === "prime-task-type-context")
     ) {
-      void Promise.resolve(applyTaskTypeAction(data.taskType, data.shapeId))
+      const actionPromise =
+        data.action === "set-task-type"
+          ? Promise.resolve(applyTaskTypeAction(data.taskType, data.shapeId))
+          : Promise.resolve(primeTaskTypePropertyContext()).then((primed) =>
+              primed
+                ? { ok: true }
+                : {
+                    ok: false,
+                    error: "Task type sidebar bootstrap did not find a usable context",
+                  },
+            );
+
+      void actionPromise
         .then((result) => {
           window.postMessage(
             {

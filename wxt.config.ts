@@ -1,4 +1,14 @@
 import { defineConfig } from "wxt";
+import { SHORTCUT_DEFINITIONS } from "./src/shared/shortcuts";
+
+const commands = Object.fromEntries(
+  SHORTCUT_DEFINITIONS.filter((definition) => definition.context === "global").map((definition) => [
+    definition.id,
+    {
+      description: definition.title,
+    },
+  ]),
+);
 
 export default defineConfig({
   srcDir: ".",
@@ -7,35 +17,16 @@ export default defineConfig({
     name: "Sigtastic",
     description: "Quickly insert favorite Signavio BPMN snippets from a keyboard-first overlay.",
     permissions: ["storage", "tabs", "activeTab"],
+    action: {
+      default_title: "Open Sigtastic Settings",
+    },
     host_permissions: ["*://*.signavio.com/*"],
     browser_specific_settings: {
       gecko: {
         id: "sigtastic@example.local",
       },
     },
-    commands: {
-      "toggle-overlay": {
-        suggested_key: {
-          default: "Alt+Shift+D",
-          mac: "Alt+Shift+D",
-        },
-        description: "Open Sigtastic overlay",
-      },
-      "save-favorite": {
-        suggested_key: {
-          default: "Alt+Shift+S",
-          mac: "Alt+Shift+S",
-        },
-        description: "Save latest copied snippet as favorite",
-      },
-      "toggle-quick-menu": {
-        suggested_key: {
-          default: "Alt+Shift+E",
-          mac: "Alt+Shift+E",
-        },
-        description: "Open Signavio quick task type menu",
-      },
-    },
+    commands,
     web_accessible_resources: [
       {
         matches: ["*://*.signavio.com/*"],

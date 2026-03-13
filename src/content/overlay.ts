@@ -7,6 +7,11 @@ import {
   type PrimaryShapeInfo,
   type TypeBadgeKind,
 } from "../shared/payload";
+import {
+  getShortcutDefinition,
+  matchesShortcut,
+  type ShortcutPlatform,
+} from "../shared/shortcuts";
 import type { Favorite } from "../shared/types";
 
 type OverlayActions = {
@@ -14,6 +19,24 @@ type OverlayActions = {
   onDelete: (favorite: Favorite) => Promise<void>;
   onMove: (favorite: Favorite, direction: "up" | "down") => Promise<void>;
   onClose: () => void;
+};
+
+type OverlayShortcutActionId =
+  | "overlay-navigate-left"
+  | "overlay-navigate-right"
+  | "overlay-navigate-up"
+  | "overlay-navigate-down"
+  | "overlay-insert-selected"
+  | "overlay-delete-selected"
+  | "overlay-move-up"
+  | "overlay-move-down";
+
+type OverlayPreferences = {
+  backdropBlurEnabled: boolean;
+  saveFavoriteShortcutLabel: string;
+  shortcutPlatform: ShortcutPlatform;
+  shortcuts: Record<OverlayShortcutActionId, string>;
+  shortcutLabels: Record<OverlayShortcutActionId, string>;
 };
 
 type InputMode = "search" | "list";
@@ -31,6 +54,7 @@ export class FavoritesOverlay {
   private readonly emptyState: HTMLDivElement;
   private readonly hintText: HTMLDivElement;
   private readonly actions: OverlayActions;
+  private preferences: OverlayPreferences;
 
   private favorites: Favorite[] = [];
   private filtered: Favorite[] = [];
@@ -42,8 +66,9 @@ export class FavoritesOverlay {
   private typeLabelFitFrame: number | null = null;
   private selectedScrollFrame: number | null = null;
 
-  constructor(actions: OverlayActions) {
+  constructor(actions: OverlayActions, preferences: OverlayPreferences) {
     this.actions = actions;
+    this.preferences = preferences;
 
     this.host = document.createElement("div");
     this.host.id = "sigtastic-overlay-host";
@@ -119,19 +144,12 @@ export class FavoritesOverlay {
 
     this.hintText = document.createElement("div");
     this.hintText.className = "sigtastic-hints";
-    this.hintText.replaceChildren(
-      this.createHintItem("Close", "Esc"),
-      this.createHintSeparator(),
-      this.createHintItem("Insert", "Enter"),
-      this.createHintSeparator(),
-      this.createHintItem("Remove", "Option+Delete"),
-      this.createHintSeparator(),
-      this.createHintItem("Reorder", "Option+Up/Down"),
-    );
+    this.renderHints();
 
     panel.append(topRow, divider, listWrap, footerDivider, this.hintText);
     this.wrapper.append(scrim, panel);
     this.root.append(style, this.wrapper);
+    this.applyPreferences();
 
     window.addEventListener("keydown", this.onKeyDown, true);
     window.addEventListener("resize", this.onResize, { passive: true });
@@ -176,6 +194,13 @@ export class FavoritesOverlay {
   public refreshFavorites(favorites: Favorite[]): void {
     this.setFavorites(favorites);
     this.scheduleSelectedVisibilityScroll();
+  }
+
+  public setPreferences(preferences: OverlayPreferences): void {
+    this.preferences = preferences;
+    this.applyPreferences();
+    this.renderHints();
+    this.renderGrid();
   }
 
   private setFavorites(favorites: Favorite[]): void {
@@ -253,7 +278,7 @@ export class FavoritesOverlay {
 
     if (this.favorites.length === 0) {
       this.emptyState.textContent =
-        "No favorites yet. Copy a shape in Signavio and use Option+Shift+S to save one.";
+        `No favorites yet. Copy a shape in Signavio and use ${this.preferences.saveFavoriteShortcutLabel} to save one.`;
       this.hintText.style.opacity = "0.75";
       return;
     }
@@ -482,6 +507,48 @@ export class FavoritesOverlay {
     separator.className = "sigtastic-hint-separator";
     separator.textContent = "|";
     return separator;
+  }
+
+  private renderHints(): void {
+    this.hintText.replaceChildren(
+      this.createHintItem("Close", "Esc"),
+      this.createHintSeparator(),
+      this.createHintItem(
+        "Insert",
+        this.preferences.shortcutLabels["overlay-insert-selected"],
+      ),
+      this.createHintSeparator(),
+      this.createHintItem(
+        "Remove",
+        this.preferences.shortcutLabels["overlay-delete-selected"],
+      ),
+      this.createHintSeparator(),
+      this.createHintItem(
+        "Move Up",
+        this.preferences.shortcutLabels["overlay-move-up"],
+      ),
+      this.createHintSeparator(),
+      this.createHintItem(
+        "Move Down",
+        this.preferences.shortcutLabels["overlay-move-down"],
+      ),
+    );
+  }
+
+  private applyPreferences(): void {
+    this.wrapper.dataset.backdropBlur = String(this.preferences.backdropBlurEnabled);
+  }
+
+  private matchesConfiguredShortcut(
+    actionId: OverlayShortcutActionId,
+    event: KeyboardEvent,
+  ): boolean {
+    return matchesShortcut(
+      event,
+      getShortcutDefinition(actionId),
+      this.preferences.shortcuts[actionId],
+      this.preferences.shortcutPlatform,
+    );
   }
 
   private createPreview(
@@ -1046,7 +1113,16 @@ export class FavoritesOverlay {
     }
 
     const selected = this.getSelectedFavorite();
-    if (event.altKey && (event.key === "Delete" || event.key === "Backspace")) {
+    const deletePressed = this.matchesConfiguredShortcut("overlay-delete-selected", event);
+    const insertPressed = this.matchesConfiguredShortcut("overlay-insert-selected", event);
+    const navigateLeftPressed = this.matchesConfiguredShortcut("overlay-navigate-left", event);
+    const navigateRightPressed = this.matchesConfiguredShortcut("overlay-navigate-right", event);
+    const navigateUpPressed = this.matchesConfiguredShortcut("overlay-navigate-up", event);
+    const navigateDownPressed = this.matchesConfiguredShortcut("overlay-navigate-down", event);
+    const moveUpPressed = this.matchesConfiguredShortcut("overlay-move-up", event);
+    const moveDownPressed = this.matchesConfiguredShortcut("overlay-move-down", event);
+
+    if (deletePressed) {
       event.preventDefault();
       if (selected) {
         this.enterListMode();
@@ -1062,6 +1138,12 @@ export class FavoritesOverlay {
       "ArrowUp",
       "ArrowDown",
     ].includes(event.key);
+    const navigationKey =
+      navigateLeftPressed ? "ArrowLeft"
+        : navigateRightPressed ? "ArrowRight"
+        : navigateUpPressed ? "ArrowUp"
+        : navigateDownPressed ? "ArrowDown"
+        : null;
     const isPrintable =
       event.key.length === 1 &&
       !event.metaKey &&
@@ -1074,12 +1156,12 @@ export class FavoritesOverlay {
         return;
       }
 
-      if (isArrow || event.key === "Enter") {
+      if (navigationKey || insertPressed || isArrow) {
         event.preventDefault();
         this.enterListMode();
 
-        if (isArrow) {
-          this.moveSelectionByKey(event.key);
+        if (navigationKey || isArrow) {
+          this.moveSelectionByKey(navigationKey ?? event.key);
           return;
         }
 
@@ -1105,19 +1187,16 @@ export class FavoritesOverlay {
       return;
     }
 
-    if (event.key === "Enter") {
+    if (insertPressed) {
       event.preventDefault();
       this.close();
       void this.actions.onInsert(selected);
       return;
     }
 
-    if (
-      event.altKey &&
-      (event.key === "ArrowUp" || event.key === "ArrowDown")
-    ) {
+    if (moveUpPressed || moveDownPressed) {
       event.preventDefault();
-      const direction = event.key === "ArrowUp" ? "up" : "down";
+      const direction = moveUpPressed ? "up" : "down";
       void this.actions.onMove(selected, direction);
       return;
     }
@@ -1128,12 +1207,12 @@ export class FavoritesOverlay {
       return;
     }
 
-    if (!isArrow) {
+    if (!isArrow && !navigationKey) {
       return;
     }
 
     event.preventDefault();
-    this.moveSelectionByKey(event.key);
+    this.moveSelectionByKey(navigationKey ?? event.key);
   };
 
   private onResize = (): void => {
@@ -1183,6 +1262,11 @@ export class FavoritesOverlay {
         backdrop-filter: blur(3px);
       }
 
+      .sigtastic-wrapper[data-backdrop-blur="false"] .sigtastic-scrim {
+        background: rgba(10, 12, 14, 0.3);
+        backdrop-filter: none;
+      }
+
       .sigtastic-panel {
         position: relative;
         width: min(900px, 95vw);
@@ -1198,6 +1282,10 @@ export class FavoritesOverlay {
         gap: 12px;
         border: 1px solid rgba(255, 255, 255, 0.24);
         overflow: hidden;
+      }
+
+      .sigtastic-wrapper[data-backdrop-blur="false"] .sigtastic-panel {
+        background: rgba(26, 28, 33, 0.84);
       }
 
       .sigtastic-top-row {

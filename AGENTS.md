@@ -1,6 +1,6 @@
 # AGENTS Notes — Sigtastic
 
-Updated: 2026-03-06
+Updated: 2026-03-12
 
 ## Purpose
 
@@ -12,10 +12,18 @@ This file records odd/tricky implementation details for future agents.
 - Entrypoints:
   - `entrypoints/background.ts`
   - `entrypoints/content.ts`
+  - `entrypoints/settings.html`
 - Page-context hook:
   - `public/clipboard-hook.js`
 - Overlay UI and interactions:
   - `src/content/overlay.ts`
+- Full settings site UI:
+  - `src/options/settings-page.ts`
+  - `src/options/settings-page.css`
+- Shared settings / shortcut source of truth:
+  - `src/shared/shortcuts.ts`
+  - `src/shared/settings.ts`
+  - `src/shared/config-transfer.ts`
 - Clipboard messaging helper:
   - `src/content/signavio-clipboard.ts`
 - Payload portability logic:
@@ -34,26 +42,49 @@ This file records odd/tricky implementation details for future agents.
 - Write request strategy:
   - Try raw payload first
   - Retry with sanitized payload on failure
+- Toolbar icon now opens the bundled full-page settings site (`settings.html`), not a popup.
+- Global Signavio shortcuts are now handled by the content script using shared settings state.
+  - There is no browser command fallback path anymore.
+  - If shortcuts regress, inspect `entrypoints/content.ts` first, not the manifest.
+
+## Settings / Config Rules
+
+- Shortcut definitions live in `src/shared/shortcuts.ts`.
+- This must stay complete:
+  - every user-facing shortcut action must be added to `SHORTCUT_DEFINITIONS`
+  - overlay-local actions count too, not just global actions
+- Shortcut persistence lives in `src/shared/settings.ts`.
+- All user-customizable data that should survive export/import must round-trip through `src/shared/config-transfer.ts`.
+- If a new customizable feature is added and it is not included in config export/import, that is a bug.
+- The settings page docs are rendered from `public/settings-docs.md`, so add product explanations there instead of hardcoding them into the page layout.
+- Settings UI is view-based (`General`, `Shortcuts`, `Documentation`) via sidebar switching, not a long scrolling one-page layout.
 
 ## Keyboard Model
 
 - Overlay has explicit mode state:
   - `search` mode: text entry + delete edits search only
   - `list` mode: navigation/actions on favorites
-- Shortcuts in list mode:
-  - `Option+Delete` or `Option+Backspace`: delete
-  - `Option+Up/Down`: reorder
+- Shortcut values are now configurable per platform via Settings.
+  - Current platform bindings are resolved from shared settings, not hardcoded strings.
+  - `Esc` remains reserved for close/confirm behavior and is intentionally not assignable.
+  - Shortcut capture in Settings is:
+    - press desired shortcut
+    - press `Esc` to confirm
+    - press `Delete` / `Backspace` to reset to defaults
 - On delete, selection moves left neighbor first (or next available if first item deleted)
 - Insert flow:
-  - On `Enter`, extension writes payload to `/p/clipboard`; user pastes manually with `Cmd/Ctrl+V`.
+  - On the configured insert shortcut, extension writes payload to `/p/clipboard`; user pastes manually with `Cmd/Ctrl+V`.
 - Save flow:
-  - On `Option+Shift+S`, extension uses latest captured payload (no synthetic keyboard copy).
+  - On the configured save shortcut, extension uses latest captured payload (no synthetic keyboard copy).
 
 ## UI Notes
 
 - Top search/header fixed; only component area scrolls.
 - Panel compact, darker, transparent, thin light border.
 - Panel and backdrop blur were reduced for readability of the underlying model.
+- Backdrop blur behind the component panel is now user-configurable from Settings (`appearance.overlayBackdropBlur`).
+  - Disabled state removes only the surrounding page blur/scrim blur.
+  - The panel itself still keeps its local blur treatment.
 - Panel layout now uses 5 explicit grid rows (`search`, divider, list, footer-divider, tips) and `minmax(0,1fr)` list row to prevent footer overflow.
 - Preview icon system supports multiple BPMN stencil families.
 - Main icon now represents only the BPMN element family.
@@ -142,7 +173,8 @@ This file records odd/tricky implementation details for future agents.
 
 - Local checks passing:
   - `npm run typecheck`
-  - `npm run build` (Firefox)
+  - `npm run build:firefox`
+  - `npm run build:chrome`
 - Manual Signavio checks still required for each major model type and after restarts.
 
 ## Handoff Checklist
@@ -163,12 +195,10 @@ This file records odd/tricky implementation details for future agents.
   - `window.__sigtasticVisibleActionables()`
   - `window.__sigtasticTaskTypeDom()`
 
-## Quick Edit Removal
+## Quick Edit Status
 
-- `Option+Shift+E` quick edit has been removed for now.
-- Removed end-to-end:
-  - manifest command registration
-  - background command routing
-  - content-script quick-edit UI / pending action plumbing
-  - active page-bridge handlers for `editor-query-request` and `editor-action-request`
-- Remaining quick-edit debug helpers may still exist in `public/clipboard-hook.js`, but they are inactive because no command/message path reaches them.
+- The quick type menu is currently active again in the extension runtime.
+- Its trigger is now part of the shared shortcut settings catalog instead of being treated as a fixed manifest shortcut.
+- If quick edit regresses, validate both sides:
+  - the shared shortcut wiring in `src/shared/shortcuts.ts` / `entrypoints/content.ts`
+  - the page-context task-type DOM fallback path in `public/clipboard-hook.js`

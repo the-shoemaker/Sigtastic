@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sigtastic Settings</title>
+    <link rel="stylesheet" href="../src/options/settings-page.css" />
+  </head>
+  <body>
+    <div class="settings-shell">
+      <aside class="settings-sidebar" aria-label="Settings navigation">
+        <div class="sidebar-brand">
+          <div class="sidebar-title">Sigtastic</div>
+          <div class="sidebar-subtitle">Settings</div>
+        </div>
+
+        <nav class="settings-nav">
+          <button class="nav-link is-active" type="button" data-view-target="general">General</button>
+          <button class="nav-link" type="button" data-view-target="shortcuts">Shortcuts</button>
+          <button class="nav-link" type="button" data-view-target="docs">Documentation</button>
+        </nav>
+      </aside>
+
+      <main class="settings-main">
+        <section class="settings-view is-active" data-view="general" aria-labelledby="general-title">
+          <header class="view-header">
+            <h1 id="general-title">General</h1>
+            <p class="view-copy">Shared extension settings and config transfer.</p>
+          </header>
+
+          <section class="settings-group">
+            <div class="group-header">
+              <h2>Appearance</h2>
+              <p>Visual preferences for the Signavio overlay.</p>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label class="setting-label" for="blur-toggle">Blur around the panel</label>
+                <p class="setting-help">Disable the surrounding page blur while keeping the panel blur itself intact.</p>
+              </div>
+              <label class="switch" for="blur-toggle">
+                <input id="blur-toggle" class="switch-input" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-group">
+            <div class="group-header">
+              <h2>Config</h2>
+              <p>Import and export all saved extension configuration.</p>
+            </div>
+
+            <div class="setting-row setting-row-stack">
+              <div class="setting-copy">
+                <div class="setting-label">Saved components</div>
+                <p class="setting-help"><span id="favorites-count">0</span> favorites are currently stored in this browser profile.</p>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-label">Export</div>
+                <p class="setting-help">Downloads a single config file with favorites, shortcuts, and future customizable settings.</p>
+              </div>
+              <button class="action-button" type="button" id="export-button">Export Config</button>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-label">Import</div>
+                <p class="setting-help">Restores favorites and settings from a previously exported config file.</p>
+              </div>
+              <button class="action-button" type="button" id="import-button">Import Config</button>
+            </div>
+
+            <p class="status-text" id="config-status">Ready.</p>
+          </section>
+        </section>
+
+        <section class="settings-view" data-view="shortcuts" aria-labelledby="shortcuts-title" hidden>
+          <header class="view-header">
+            <h1 id="shortcuts-title">Shortcuts</h1>
+            <p class="view-copy">Platform-specific shortcuts for Signavio actions and the component panel.</p>
+          </header>
+
+          <div class="view-note">
+            Click a shortcut field, press the new combination, then press <strong>Esc</strong> to save it.
+            Press <strong>Delete</strong> or <strong>Backspace</strong> to reset it.
+          </div>
+
+          <div class="shortcut-toolbar">
+            <div class="platform-tabs" id="platform-tabs" role="tablist" aria-label="Shortcut platforms"></div>
+            <div class="platform-indicator">Editing <span id="platform-pill">Fallback</span></div>
+          </div>
+
+          <section class="settings-group">
+            <div class="group-header">
+              <h2>Quick Menu Numbers</h2>
+              <p>The quick menu uses one modifier key together with the visible numbers.</p>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label class="setting-label" for="quick-menu-number-modifier">Number modifier</label>
+                <p class="setting-help">Auto follows the open shortcut. If that contains multiple modifiers, Sigtastic prefers Option, then Control, then Command.</p>
+              </div>
+              <select id="quick-menu-number-modifier" class="setting-select">
+                <option value="auto">Auto</option>
+                <option value="alt">Option / Alt</option>
+                <option value="ctrl">Control</option>
+                <option value="command">Command</option>
+              </select>
+            </div>
+          </section>
+
+          <div class="shortcut-groups" id="shortcut-groups"></div>
+        </section>
+
+        <section class="settings-view" data-view="docs" aria-labelledby="docs-title" hidden>
+          <header class="view-header">
+            <h1 id="docs-title">Documentation</h1>
+            <p class="view-copy">Here you can learn how to use and fine-tune the many tweaks in Sigtastic.</p>
+          </header>
+
+          <div class="docs-layout">
+            <div class="docs-content" id="docs-content"></div>
+            <aside class="docs-nav" id="docs-toc" aria-label="Documentation navigation"></aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <input id="import-input" type="file" accept=".json,application/json" hidden />
+    <script type="module" src="../src/options/settings-page.ts"></script>
+  </body>
+</html>

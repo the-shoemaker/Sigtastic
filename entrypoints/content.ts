@@ -14,6 +14,23 @@ import {
 } from "../src/content/signavio-clipboard";
 import { FavoritesOverlay } from "../src/content/overlay";
 import { QuickTypeMenu } from "../src/content/quick-menu";
+import {
+  formatShortcutForDisplay,
+  getPlatformFromBrowserOs,
+  getShortcutBindingForPlatform,
+  getShortcutDefinition,
+  matchesShortcut,
+  resolveQuickMenuNumberModifier,
+  type ShortcutActionId,
+  type ShortcutPlatform,
+} from "../src/shared/shortcuts";
+import {
+  getDefaultSettings,
+  getSettings,
+  normalizeSettings,
+  SETTINGS_STORAGE_KEY,
+  type SigtasticSettings,
+} from "../src/shared/settings";
 import type {
   ClipboardCapture,
   ContentMessage,
@@ -25,6 +42,10 @@ import { getPrimaryShapeInfo, getSuggestedFavoriteName } from "../src/shared/pay
 const MESSAGE_SOURCE = "sigtastic-hook";
 let overlay: FavoritesOverlay | null = null;
 let quickMenu: QuickTypeMenu | null = null;
+let quickMenuBootstrapComplete = false;
+let currentPlatform: ShortcutPlatform = "default";
+let currentSettings: SigtasticSettings = getDefaultSettings();
+const recentGlobalShortcutDispatches = new Map<ShortcutActionId, number>();
 
 const pendingClipboardWrites = new Map<
   string,
@@ -82,6 +103,165 @@ const toast = (() => {
     }, 2500);
   };
 })();
+
+const getPasteShortcutLabel = (): string => {
+  return currentPlatform === "mac" ? "Command+V" : "Ctrl+V";
+};
+
+const getShortcutValue = (actionId: ShortcutActionId): string => {
+  return getShortcutBindingForPlatform(currentSettings.shortcuts[actionId], currentPlatform);
+};
+
+const getShortcutLabel = (actionId: ShortcutActionId): string => {
+  return formatShortcutForDisplay(getShortcutValue(actionId), currentPlatform);
+};
+
+const buildOverlayPreferences = () => ({
+  backdropBlurEnabled: currentSettings.appearance.overlayBackdropBlur,
+  saveFavoriteShortcutLabel: getShortcutLabel("save-favorite"),
+  shortcutPlatform: currentPlatform,
+  shortcuts: {
+    "overlay-insert-selected": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-insert-selected"], currentPlatform,
+    ),
+    "overlay-delete-selected": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-delete-selected"], currentPlatform,
+    ),
+    "overlay-move-up": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-move-up"], currentPlatform,
+    ),
+    "overlay-move-down": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-move-down"], currentPlatform,
+    ),
+    "overlay-navigate-left": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-navigate-left"], currentPlatform,
+    ),
+    "overlay-navigate-right": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-navigate-right"], currentPlatform,
+    ),
+    "overlay-navigate-up": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-navigate-up"], currentPlatform,
+    ),
+    "overlay-navigate-down": getShortcutBindingForPlatform(
+      currentSettings.shortcuts["overlay-navigate-down"], currentPlatform,
+    ),
+  },
+  shortcutLabels: {
+    "overlay-insert-selected": getShortcutLabel("overlay-insert-selected"),
+    "overlay-delete-selected": getShortcutLabel("overlay-delete-selected"),
+    "overlay-move-up": getShortcutLabel("overlay-move-up"),
+    "overlay-move-down": getShortcutLabel("overlay-move-down"),
+    "overlay-navigate-left": getShortcutLabel("overlay-navigate-left"),
+    "overlay-navigate-right": getShortcutLabel("overlay-navigate-right"),
+    "overlay-navigate-up": getShortcutLabel("overlay-navigate-up"),
+    "overlay-navigate-down": getShortcutLabel("overlay-navigate-down"),
+  },
+});
+
+const buildQuickMenuPreferences = () => ({
+  shortcutPlatform: currentPlatform,
+  resolvedNumberShortcutModifier: resolveQuickMenuNumberModifier(
+    getShortcutValue("toggle-quick-menu"),
+    currentPlatform,
+    currentSettings.quickMenu.numberShortcutModifier,
+  ),
+});
+
+const syncOverlayPreferences = (): void => {
+  overlay?.setPreferences(buildOverlayPreferences());
+  quickMenu?.setPreferences(buildQuickMenuPreferences());
+};
+
+const isEditableTarget = (target: EventTarget | null): boolean => {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  return Boolean(
+    target.closest(
+      'input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"]',
+    ),
+  );
+};
+
+const runGlobalShortcutAction = async (actionId: ShortcutActionId): Promise<void> => {
+  if (actionId === "toggle-overlay") {
+    await handleToggleOverlay();
+    return;
+  }
+
+  if (actionId === "save-favorite") {
+    await handleSaveFavorite();
+    return;
+  }
+
+  if (actionId === "toggle-quick-menu") {
+    await handleToggleQuickMenu();
+  }
+};
+
+const dispatchGlobalShortcutAction = (actionId: ShortcutActionId): void => {
+  const now = Date.now();
+  const previous = recentGlobalShortcutDispatches.get(actionId) ?? 0;
+  if (now - previous < 180) {
+    return;
+  }
+
+  recentGlobalShortcutDispatches.set(actionId, now);
+  void runGlobalShortcutAction(actionId);
+};
+
+const GLOBAL_SHORTCUT_ACTIONS: ShortcutActionId[] = [
+  "toggle-overlay",
+  "save-favorite",
+  "toggle-quick-menu",
+];
+
+const onConfiguredShortcutKeyDown = (event: KeyboardEvent): void => {
+  const overlayOpen = overlay?.isOpen() ?? false;
+  const quickMenuOpen = quickMenu?.isOpen() ?? false;
+
+  if (!overlayOpen && !quickMenuOpen && (event.defaultPrevented || isEditableTarget(event.target))) {
+    return;
+  }
+
+  for (const actionId of GLOBAL_SHORTCUT_ACTIONS) {
+    if (
+      !matchesShortcut(
+        event,
+        getShortcutDefinition(actionId),
+        getShortcutValue(actionId),
+        currentPlatform,
+      )
+    ) {
+      continue;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    dispatchGlobalShortcutAction(actionId);
+    return;
+  }
+};
+
+const applyUpdatedSettings = (nextSettings: SigtasticSettings): void => {
+  currentSettings = nextSettings;
+  syncOverlayPreferences();
+};
+
+const detectPlatform = async (): Promise<ShortcutPlatform> => {
+  try {
+    const info = await browser.runtime.getPlatformInfo();
+    return getPlatformFromBrowserOs(info.os);
+  } catch {
+    return "default";
+  }
+};
 
 const showSaveFavoriteModal = (
   defaults: {
@@ -429,6 +609,33 @@ const requestTaskTypeApply = async (
   return typedResult;
 };
 
+const requestQuickMenuBootstrap = async (): Promise<{ ok: boolean; error?: string }> => {
+  const requestId = createRequestId("editor-action");
+  const result = await new Promise<unknown>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingEditorRequests.delete(requestId);
+      reject(new Error("Timed out waiting for quick menu bootstrap"));
+    }, 20000);
+
+    pendingEditorRequests.set(requestId, { resolve, reject, timer });
+    window.postMessage(
+      {
+        source: CLIPBOARD_CONTENT_SOURCE,
+        type: "editor-action-request",
+        requestId,
+        action: "prime-task-type-context",
+      },
+      window.location.origin,
+    );
+  });
+
+  if (typeof result !== "object" || result === null || typeof (result as { ok?: unknown }).ok !== "boolean") {
+    throw new Error("Quick menu bootstrap response was invalid");
+  }
+
+  return result as { ok: boolean; error?: string };
+};
+
 const writeFavoriteToClipboard = async (favorite: {
   payload: unknown;
   namespace: string;
@@ -477,7 +684,7 @@ const ensureOverlay = (): FavoritesOverlay => {
     onInsert: async (favorite) => {
       try {
         await writeFavoriteToClipboard(favorite);
-        toast(`Loaded favorite: ${favorite.name}. Press Cmd/Ctrl+V to paste.`);
+        toast(`Loaded favorite: ${favorite.name}. Press ${getPasteShortcutLabel()} to paste.`);
       } catch (error) {
         console.error("[Sigtastic] Failed to write favorite payload", error);
         const message = error instanceof Error ? error.message : String(error);
@@ -496,7 +703,7 @@ const ensureOverlay = (): FavoritesOverlay => {
     onClose: () => {
       // Intentionally empty; close state is managed inside overlay.
     },
-  });
+  }, buildOverlayPreferences());
 
   return overlay;
 };
@@ -514,6 +721,22 @@ const getTaskTypeLabel = (taskType: TaskTypeOption): string => {
   };
 
   return labels[taskType];
+};
+
+const getQuickMenuSelectionError = (selection: EditorSelectionInfo): string | null => {
+  if (!selection.hasSelection) {
+    return "Select a task first.";
+  }
+
+  if (selection.selectedCount > 1) {
+    return "Select a single task for quick type change.";
+  }
+
+  if (!selection.isTask) {
+    return "Quick type menu works on task elements only.";
+  }
+
+  return null;
 };
 
 const ensureQuickMenu = (): QuickTypeMenu => {
@@ -541,7 +764,7 @@ const ensureQuickMenu = (): QuickTypeMenu => {
     onClose: () => {
       // Intentionally empty; close state is managed inside the menu.
     },
-  });
+  }, buildQuickMenuPreferences());
 
   return quickMenu;
 };
@@ -613,38 +836,33 @@ const handleToggleQuickMenu = async () => {
     return;
   }
 
-  if (!selection.hasSelection) {
-    toast("Select a task first.");
+  const selectionError = getQuickMenuSelectionError(selection);
+  if (selectionError) {
+    toast(selectionError);
     return;
   }
 
-  if (selection.selectedCount > 1) {
-    toast("Select a single task for quick type change.");
-    return;
-  }
+  if (!quickMenuBootstrapComplete) {
+    try {
+      const bootstrapResult = await requestQuickMenuBootstrap();
+      if (bootstrapResult.ok) {
+        quickMenuBootstrapComplete = true;
+        selection = await requestEditorQuery();
+      } else {
+        console.warn("[Sigtastic] Quick menu bootstrap did not complete", bootstrapResult.error);
+      }
+    } catch (error) {
+      console.warn("[Sigtastic] Quick menu bootstrap failed", error);
+    }
 
-  if (!selection.isTask) {
-    toast("Quick type menu works on task elements only.");
-    return;
+    const refreshedSelectionError = getQuickMenuSelectionError(selection);
+    if (refreshedSelectionError) {
+      toast(refreshedSelectionError);
+      return;
+    }
   }
 
   instance.open(selection);
-};
-
-const handleBackgroundMessage = async (message: ContentMessage) => {
-  if (message.type === "SIGTASTIC_SAVE_FAVORITE") {
-    await handleSaveFavorite();
-    return;
-  }
-
-  if (message.type === "SIGTASTIC_TOGGLE_OVERLAY") {
-    await handleToggleOverlay();
-    return;
-  }
-
-  if (message.type === "SIGTASTIC_TOGGLE_QUICK_MENU") {
-    await handleToggleQuickMenu();
-  }
 };
 
 export default defineContentScript({
@@ -652,8 +870,12 @@ export default defineContentScript({
   runAt: "document_idle",
   main() {
     injectClipboardHook();
+    window.addEventListener("keydown", onConfiguredShortcutKeyDown, true);
 
     void (async () => {
+      currentPlatform = await detectPlatform();
+      applyUpdatedSettings(await getSettings());
+
       const latest = await getLatestCapture();
       const templateFromLatest = latest?.requestTemplate;
       const templateFromFavorites = !templateFromLatest
@@ -702,13 +924,31 @@ export default defineContentScript({
         );
       }
     });
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !(SETTINGS_STORAGE_KEY in changes)) {
+        return;
+      }
+
+      applyUpdatedSettings(normalizeSettings(changes[SETTINGS_STORAGE_KEY]?.newValue));
+    });
 
     browser.runtime.onMessage.addListener((message: unknown) => {
       if (!message || typeof message !== "object" || !("type" in message)) {
         return;
       }
 
-      return handleBackgroundMessage(message as ContentMessage);
+      const typedMessage = message as ContentMessage;
+      if (typedMessage.type === "SIGTASTIC_SAVE_FAVORITE") {
+        dispatchGlobalShortcutAction("save-favorite");
+        return;
+      }
+      if (typedMessage.type === "SIGTASTIC_TOGGLE_OVERLAY") {
+        dispatchGlobalShortcutAction("toggle-overlay");
+        return;
+      }
+      if (typedMessage.type === "SIGTASTIC_TOGGLE_QUICK_MENU") {
+        dispatchGlobalShortcutAction("toggle-quick-menu");
+      }
     });
   },
 });

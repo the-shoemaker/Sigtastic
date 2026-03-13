@@ -1,8 +1,19 @@
+import {
+  getQuickMenuModifierLabel,
+  matchesQuickMenuNumberShortcut,
+  type ShortcutPlatform,
+  type ResolvedQuickMenuNumberModifier,
+} from "../shared/shortcuts";
 import type { EditorSelectionInfo, TaskTypeOption } from "../shared/types";
 
 type QuickTypeMenuActions = {
   onApply: (taskType: TaskTypeOption) => Promise<boolean>;
   onClose: () => void;
+};
+
+type QuickMenuPreferences = {
+  shortcutPlatform: ShortcutPlatform;
+  resolvedNumberShortcutModifier: ResolvedQuickMenuNumberModifier;
 };
 
 type TaskTypeOptionConfig = {
@@ -20,7 +31,6 @@ const TASK_TYPE_OPTIONS: TaskTypeOptionConfig[] = [
   { id: "manual", label: "Manual" },
   { id: "business-rule", label: "Business Rule" },
 ];
-
 const MENU_GUTTER = 6;
 const VIEWPORT_PADDING = 10;
 const TYPEAHEAD_RESET_MS = 850;
@@ -51,11 +61,12 @@ export class QuickTypeMenu {
   private readonly list: HTMLDivElement;
   private readonly actions: QuickTypeMenuActions;
   private readonly supportsCssAnchors: boolean;
+  private preferences: QuickMenuPreferences;
 
   private optionButtons = new Map<TaskTypeOption, HTMLButtonElement>();
   private opened = false;
   private applying = false;
-  private altKeyPressed = false;
+  private modifierKeyPressed = false;
   private optionHintsVisible = false;
   private selectedIndex = 0;
   private currentTaskType: TaskTypeOption | null = null;
@@ -64,8 +75,9 @@ export class QuickTypeMenu {
   private typedQuery = "";
   private typedQueryTimer: number | null = null;
 
-  constructor(actions: QuickTypeMenuActions) {
+  constructor(actions: QuickTypeMenuActions, preferences: QuickMenuPreferences) {
     this.actions = actions;
+    this.preferences = preferences;
     // CSS anchor positioning proved visually unstable on this tenant/browser combo,
     // so we keep the anchored geometry model but use the JS-clamped placement path.
     this.supportsCssAnchors = false;
@@ -132,7 +144,7 @@ export class QuickTypeMenu {
 
   public open(selection: EditorSelectionInfo): void {
     this.opened = true;
-    this.optionHintsVisible = this.altKeyPressed;
+    this.optionHintsVisible = this.modifierKeyPressed;
     this.typedQuery = "";
     this.currentTaskType = selection.taskType;
     this.shapeId = selection.shapeId;
@@ -165,6 +177,14 @@ export class QuickTypeMenu {
     this.panel.style.top = "";
     delete this.panel.dataset.optionHints;
     this.actions.onClose();
+  }
+
+  public setPreferences(preferences: QuickMenuPreferences): void {
+    this.preferences = preferences;
+    if (this.opened) {
+      this.render();
+      this.focusSelectedButton();
+    }
   }
 
   private render(): void {
@@ -210,6 +230,10 @@ export class QuickTypeMenu {
       const shortcut = document.createElement("span");
       shortcut.className = "sigtastic-quick-shortcut";
       shortcut.textContent = getOptionHintNumber(index);
+      shortcut.setAttribute(
+        "title",
+        `${getQuickMenuModifierLabel(this.preferences.resolvedNumberShortcutModifier, this.preferences.shortcutPlatform)} + ${getOptionHintNumber(index)}`,
+      );
       shortcut.setAttribute("aria-hidden", "true");
 
       button.append(icon, label);
@@ -372,24 +396,19 @@ export class QuickTypeMenu {
   }
 
   private getShortcutOption(event: KeyboardEvent): TaskTypeOption | null {
-    if (!event.altKey) {
-      return null;
+    for (const [index, option] of TASK_TYPE_OPTIONS.entries()) {
+      if (
+        matchesQuickMenuNumberShortcut(
+          event,
+          this.preferences.resolvedNumberShortcutModifier,
+          index + 1,
+          this.preferences.shortcutPlatform,
+        )
+      ) {
+        return option.id;
+      }
     }
-
-    const code = event.code || "";
-    let index = -1;
-
-    if (code.startsWith("Digit")) {
-      index = Number.parseInt(code.slice(5), 10) - 1;
-    } else if (code.startsWith("Numpad")) {
-      index = Number.parseInt(code.slice(6), 10) - 1;
-    }
-
-    if (Number.isNaN(index) || index < 0 || index >= TASK_TYPE_OPTIONS.length) {
-      return null;
-    }
-
-    return TASK_TYPE_OPTIONS[index]?.id ?? null;
+    return null;
   }
 
   private syncAnchor(): void {
@@ -479,8 +498,8 @@ export class QuickTypeMenu {
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === "Alt") {
-      this.altKeyPressed = true;
+    if (this.isHintModifierKey(event.key)) {
+      this.modifierKeyPressed = true;
       if (this.opened) {
         this.optionHintsVisible = true;
         this.syncOptionHints();
@@ -565,15 +584,15 @@ export class QuickTypeMenu {
   };
 
   private onKeyUp = (event: KeyboardEvent): void => {
-    if (event.key === "Alt") {
-      this.altKeyPressed = false;
+    if (this.isHintModifierKey(event.key)) {
+      this.modifierKeyPressed = false;
     }
 
     if (!this.opened) {
       return;
     }
 
-    if (event.key !== "Alt") {
+    if (!this.isHintModifierKey(event.key)) {
       return;
     }
 
@@ -582,7 +601,7 @@ export class QuickTypeMenu {
   };
 
   private onWindowBlur = (): void => {
-    this.altKeyPressed = false;
+    this.modifierKeyPressed = false;
 
     if (!this.opened) {
       return;
@@ -591,6 +610,18 @@ export class QuickTypeMenu {
     this.optionHintsVisible = false;
     this.syncOptionHints();
   };
+
+  private isHintModifierKey(key: string): boolean {
+    if (this.preferences.resolvedNumberShortcutModifier === "Alt") {
+      return key === "Alt";
+    }
+
+    if (this.preferences.resolvedNumberShortcutModifier === "Ctrl") {
+      return key === "Control";
+    }
+
+    return key === "Meta" || key === "Command";
+  }
 
   private onResize = (): void => {
     if (!this.opened) {
@@ -720,7 +751,7 @@ export class QuickTypeMenu {
 
       .sigtastic-quick-option {
         display: grid;
-        grid-template-columns: 28px minmax(0, 1fr) 70px 18px;
+        grid-template-columns: 28px minmax(0, 1fr) auto minmax(48px, auto);
         align-items: center;
         gap: 10px;
         width: 100%;
@@ -781,7 +812,7 @@ export class QuickTypeMenu {
       .sigtastic-quick-shortcut {
         grid-column: 4;
         justify-self: end;
-        min-width: 10px;
+        min-width: 42px;
         font-size: 10px;
         font-weight: 600;
         color: rgba(243, 243, 243, 0.62);
