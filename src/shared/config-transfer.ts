@@ -2,7 +2,7 @@ import { getFavorites, setFavorites } from "./storage";
 import { getSettings, normalizeSettings, setSettings, type SigtasticSettings } from "./settings";
 import type { Favorite } from "./types";
 
-export const CONFIG_EXPORT_VERSION = 1;
+export const CONFIG_EXPORT_VERSION = 2;
 
 export type SigtasticConfigExport = {
   version: number;

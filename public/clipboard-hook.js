@@ -9,10 +9,13 @@
   const MESSAGE_SOURCE = "sigtastic-hook";
   const CONTENT_SOURCE = "sigtastic-content";
   const CLIPBOARD_PATH = "/p/clipboard";
+  const MODEL_PATH_PREFIX = "/p/model/";
   const BPMN_NAMESPACE = "http://b3mn.org/stencilset/bpmn2.0#";
+  const AUTO_SAVE_LOG_PREFIX = "[Sigtastic][AutoSave]";
 
   let lastClipboardHeaders = {};
   let lastClipboardParams = null;
+  let lastModelSaveHeaders = {};
   let lastPointerTarget = null;
   let lastPointerShapeId = "";
   let lastShapePointerTarget = null;
@@ -25,6 +28,14 @@
   const nativeSend = XMLHttpRequest.prototype.send;
   const nativeSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
 
+  const autoSaveLog = (...args) => {
+    console.info(AUTO_SAVE_LOG_PREFIX, ...args);
+  };
+
+  const autoSaveWarn = (...args) => {
+    console.warn(AUTO_SAVE_LOG_PREFIX, ...args);
+  };
+
   const isClipboardUrl = (inputUrl) => {
     if (!inputUrl) {
       return false;
@@ -33,6 +44,19 @@
     try {
       const resolvedUrl = new URL(inputUrl, window.location.origin);
       return resolvedUrl.pathname === CLIPBOARD_PATH;
+    } catch {
+      return false;
+    }
+  };
+
+  const isModelSaveUrl = (inputUrl) => {
+    if (!inputUrl) {
+      return false;
+    }
+
+    try {
+      const resolvedUrl = new URL(inputUrl, window.location.origin);
+      return resolvedUrl.pathname.startsWith(MODEL_PATH_PREFIX);
     } catch {
       return false;
     }
@@ -360,6 +384,15 @@
     );
   };
 
+  const getCurrentModelId = () => {
+    try {
+      const url = new URL(window.location.href);
+      return (url.searchParams.get("id") || "").trim();
+    } catch {
+      return "";
+    }
+  };
+
   const emitCapture = (valueJsonText, namespace, source, requestTemplate) => {
     if (!valueJsonText) {
       return;
@@ -388,22 +421,33 @@
 
   const parseAndEmit = (url, method, body, source, headers) => {
     const normalizedMethod = String(method || "GET").toUpperCase();
-    if (normalizedMethod !== "POST" || !isClipboardUrl(url)) {
+    if (normalizedMethod === "POST" && isClipboardUrl(url)) {
+      lastClipboardHeaders = pickForwardHeaders(headers);
+
+      const params = asSearchParams(body);
+      if (!params) {
+        return;
+      }
+
+      lastClipboardParams = cloneSearchParams(params);
+      emitCapture(params.get("value_json"), params.get("namespace"), source, {
+        headers: { ...lastClipboardHeaders },
+        params: paramsToTemplateEntries(params),
+      });
       return;
     }
 
-    lastClipboardHeaders = pickForwardHeaders(headers);
+    if (normalizedMethod === "PUT" && isModelSaveUrl(url)) {
+      lastModelSaveHeaders = pickForwardHeaders(headers);
 
-    const params = asSearchParams(body);
-    if (!params) {
-      return;
+      const params = asSearchParams(body);
+      autoSaveLog("Observed native model save request.", {
+        source,
+        url: String(url || ""),
+        headerNames: Object.keys(lastModelSaveHeaders),
+        bodyKeys: params ? Array.from(params.keys()) : [],
+      });
     }
-
-    lastClipboardParams = cloneSearchParams(params);
-    emitCapture(params.get("value_json"), params.get("namespace"), source, {
-      headers: { ...lastClipboardHeaders },
-      params: paramsToTemplateEntries(params),
-    });
   };
 
   const writeClipboard = async (requestId, valueJson, namespace, requestTemplate) => {
@@ -759,6 +803,177 @@
 
     lastResolvedFacade = rankedCandidates[0]?.candidate || null;
     return lastResolvedFacade;
+  };
+
+  const isSerializedModelPayload = (value) => {
+    return Boolean(
+      value &&
+      typeof value === "object" &&
+      typeof value.resourceId === "string" &&
+      value.stencil &&
+      typeof value.stencil === "object" &&
+      typeof value.stencil.id === "string" &&
+      Array.isArray(value.childShapes),
+    );
+  };
+
+  const normalizeSerializedModelPayload = (value) => {
+    if (!value) {
+      return null;
+    }
+
+    if (typeof value === "string") {
+      return safeParseJson(value);
+    }
+
+    if (typeof value === "object") {
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch {}
+    }
+
+    return null;
+  };
+
+  const getCanvasSerializationCandidates = (facade) => {
+    const candidates = [];
+
+    if (facade) {
+      candidates.push(facade);
+
+      try {
+        if (typeof facade.getCanvas === "function") {
+          const canvas = facade.getCanvas();
+          if (canvas) {
+            candidates.push(canvas);
+          }
+        }
+      } catch {}
+
+      for (const key of ["canvas", "_canvas", "model", "editor"]) {
+        try {
+          if (facade[key]) {
+            candidates.push(facade[key]);
+          }
+        } catch {}
+      }
+    }
+
+    return candidates.filter(Boolean);
+  };
+
+  const serializeCurrentModel = () => {
+    const facade = findEditorFacade();
+    const candidates = getCanvasSerializationCandidates(facade);
+    const attemptedStrategies = [];
+
+    for (const candidate of candidates) {
+      for (const methodName of ["toJSON", "getJSON", "serialize"]) {
+        try {
+          if (typeof candidate[methodName] !== "function") {
+            continue;
+          }
+
+          attemptedStrategies.push(methodName);
+          const serialized = normalizeSerializedModelPayload(candidate[methodName]());
+          if (isSerializedModelPayload(serialized)) {
+            autoSaveLog("Serialized model.", {
+              strategy: methodName,
+              childShapeCount: Array.isArray(serialized.childShapes) ? serialized.childShapes.length : 0,
+              resourceId: serialized.resourceId,
+            });
+            return serialized;
+          }
+        } catch {}
+      }
+
+      attemptedStrategies.push("json/model");
+      const directPayload = normalizeSerializedModelPayload(candidate.json || candidate.model || null);
+      if (isSerializedModelPayload(directPayload)) {
+        autoSaveLog("Serialized model.", {
+          strategy: "json/model",
+          childShapeCount: Array.isArray(directPayload.childShapes) ? directPayload.childShapes.length : 0,
+          resourceId: directPayload.resourceId,
+        });
+        return directPayload;
+      }
+    }
+
+    autoSaveWarn("Model serialization failed.", {
+      candidateCount: candidates.length,
+      attemptedStrategies,
+    });
+    throw new Error("Unable to serialize the current Signavio model");
+  };
+
+  const saveCurrentModel = async () => {
+    const modelId = getCurrentModelId();
+    if (!modelId) {
+      throw new Error("Could not determine the current Signavio model id");
+    }
+
+    const serializedModel = serializeCurrentModel();
+    const params = new URLSearchParams();
+    params.set("json_xml", JSON.stringify(serializedModel));
+
+    const headers = {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "x-requested-with": "XMLHttpRequest",
+      ...lastModelSaveHeaders,
+    };
+
+    const csrfToken = getCsrfToken();
+    if (csrfToken) {
+      headers["x-csrf-token"] = csrfToken;
+    }
+
+    autoSaveLog("Sending direct save request.", {
+      modelId,
+      headerNames: Object.keys(headers),
+      usesObservedHeaders: Object.keys(lastModelSaveHeaders).length > 0,
+      bodyLength: params.toString().length,
+    });
+
+    const response = await nativeFetch(
+      new URL(`${MODEL_PATH_PREFIX}${encodeURIComponent(modelId)}?_dc=${Date.now()}`, window.location.origin).toString(),
+      {
+        method: "PUT",
+        credentials: "include",
+        headers,
+        body: params.toString(),
+      },
+    );
+
+    if (!response.ok) {
+      let errorText = "";
+      try {
+        errorText = (await response.text()).slice(0, 220);
+      } catch {}
+
+      autoSaveWarn("Direct save request failed.", {
+        modelId,
+        status: response.status,
+        errorText,
+      });
+      throw new Error(errorText || `Save request failed (${response.status})`);
+    }
+
+    autoSaveLog("Direct save request succeeded.", {
+      modelId,
+      status: response.status,
+    });
+    return {
+      ok: true,
+      modelId,
+      savedAt: Date.now(),
+    };
+  };
+
+  window.__sigtasticAutoSaveDebug = {
+    getLastObservedSaveHeaders: () => ({ ...lastModelSaveHeaders }),
+    getCurrentModelId,
+    triggerDirectSave: () => saveCurrentModel(),
   };
 
   const resolveShape = (entry) => {
@@ -3894,19 +4109,25 @@
     if (
       data.type === "editor-action-request" &&
       typeof data.requestId === "string" &&
-      (data.action === "set-task-type" || data.action === "prime-task-type-context")
+      (
+        data.action === "set-task-type" ||
+        data.action === "prime-task-type-context" ||
+        data.action === "save-model"
+      )
     ) {
       const actionPromise =
         data.action === "set-task-type"
           ? Promise.resolve(applyTaskTypeAction(data.taskType, data.shapeId))
-          : Promise.resolve(primeTaskTypePropertyContext()).then((primed) =>
-              primed
-                ? { ok: true }
-                : {
-                    ok: false,
-                    error: "Task type sidebar bootstrap did not find a usable context",
-                  },
-            );
+          : data.action === "prime-task-type-context"
+            ? Promise.resolve(primeTaskTypePropertyContext()).then((primed) =>
+                primed
+                  ? { ok: true }
+                  : {
+                      ok: false,
+                      error: "Task type sidebar bootstrap did not find a usable context",
+                    },
+              )
+            : Promise.resolve(saveCurrentModel());
 
       void actionPromise
         .then((result) => {

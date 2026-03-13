@@ -31,8 +31,18 @@ Exports include:
 - saved favorites
 - shortcut mappings
 - appearance settings
+- auto-save settings
 
 Importing a config restores your saved pieces and your setup in one go, which makes it easy to move Sigtastic to another browser profile or machine.
+
+## Auto Save
+
+Sigtastic can run a direct save on a timer while a Signavio editor tab is open.
+
+- Enable Auto Save in Settings.
+- Pick the interval in minutes. Decimal values below 1 minute are allowed for testing.
+- Each run shows a toast after the save attempt finishes.
+- Auto Save uses a direct save request instead of waiting for Signavio's validation confirmation flow.
 
 ## Quick Type Menu
 

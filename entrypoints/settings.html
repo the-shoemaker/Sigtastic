@@ -48,6 +48,43 @@
 
           <section class="settings-group">
             <div class="group-header">
+              <h2>Auto Save</h2>
+              <p>Run a direct Signavio save on a timer without opening validation confirmation dialogs.</p>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label class="setting-label" for="auto-save-toggle">Enable auto save</label>
+                <p class="setting-help">Sigtastic will trigger a direct save in the current Signavio editor tab and show a toast for each attempt.</p>
+              </div>
+              <label class="switch" for="auto-save-toggle">
+                <input id="auto-save-toggle" class="switch-input" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div class="setting-copy">
+                <label class="setting-label" for="auto-save-interval">Interval</label>
+                <p class="setting-help">Choose how many minutes Sigtastic waits between auto-save attempts while the editor tab is open.</p>
+              </div>
+              <div class="setting-inline-input">
+                <input
+                  id="auto-save-interval"
+                  class="setting-input"
+                  type="number"
+                  min="0.1"
+                  max="120"
+                  step="0.1"
+                  inputmode="numeric"
+                />
+                <span class="setting-inline-suffix">minutes</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-group">
+            <div class="group-header">
               <h2>Config</h2>
               <p>Import and export all saved extension configuration.</p>
             </div>

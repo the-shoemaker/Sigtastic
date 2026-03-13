@@ -253,7 +253,8 @@ a {
 .action-button,
 .platform-tab,
 .shortcut-reset,
-.setting-select {
+.setting-select,
+.setting-input {
   padding: 10px 14px;
   border-radius: 10px;
   border: 1px solid var(--border-strong);
@@ -275,7 +276,9 @@ a {
 .shortcut-reset:hover,
 .shortcut-reset:focus-visible,
 .setting-select:hover,
-.setting-select:focus-visible {
+.setting-select:focus-visible,
+.setting-input:hover,
+.setting-input:focus-visible {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.28);
   outline: none;
@@ -413,8 +416,30 @@ a {
 }
 
 .shortcut-input:focus-visible,
-.setting-select:focus-visible {
+.setting-select:focus-visible,
+.setting-input:focus-visible {
   box-shadow: 0 0 0 1px rgba(126, 161, 255, 0.42);
+}
+
+.setting-inline-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.setting-input {
+  width: 96px;
+}
+
+.setting-input:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.setting-inline-suffix {
+  color: var(--text-soft);
+  font-size: 14px;
+  white-space: nowrap;
 }
 
 .shortcut-item.is-capturing .shortcut-input {
@@ -603,7 +628,13 @@ a {
 
   .action-button,
   .shortcut-reset,
-  .shortcut-input {
+  .shortcut-input,
+  .setting-input {
     width: 100%;
+  }
+
+  .setting-inline-input {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 }
