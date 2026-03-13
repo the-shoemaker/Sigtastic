@@ -68,6 +68,25 @@ a {
   margin-bottom: 26px;
 }
 
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sidebar-logo-wrap {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.sidebar-logo {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: block;
+  object-fit: contain;
+}
+
 .sidebar-title {
   font-size: 36px;
   line-height: 0.95;
@@ -253,8 +272,7 @@ a {
 .action-button,
 .platform-tab,
 .shortcut-reset,
-.setting-select,
-.setting-input {
+.setting-select {
   padding: 10px 14px;
   border-radius: 10px;
   border: 1px solid var(--border-strong);
@@ -276,9 +294,7 @@ a {
 .shortcut-reset:hover,
 .shortcut-reset:focus-visible,
 .setting-select:hover,
-.setting-select:focus-visible,
-.setting-input:hover,
-.setting-input:focus-visible {
+.setting-select:focus-visible {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.28);
   outline: none;
@@ -329,6 +345,7 @@ a {
 .shortcut-groups {
   display: grid;
   gap: 24px;
+  margin-top: 28px;
 }
 
 .shortcut-group + .shortcut-group {
@@ -336,7 +353,7 @@ a {
 }
 
 .shortcut-group-header {
-  margin-bottom: 14px;
+  margin-bottom: 22px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -367,6 +384,7 @@ a {
 
 .shortcut-item:first-child {
   border-top: none;
+  padding-top: 6px;
 }
 
 .shortcut-copy {
@@ -416,30 +434,8 @@ a {
 }
 
 .shortcut-input:focus-visible,
-.setting-select:focus-visible,
-.setting-input:focus-visible {
+.setting-select:focus-visible {
   box-shadow: 0 0 0 1px rgba(126, 161, 255, 0.42);
-}
-
-.setting-inline-input {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.setting-input {
-  width: 96px;
-}
-
-.setting-input:disabled {
-  opacity: 0.52;
-  cursor: not-allowed;
-}
-
-.setting-inline-suffix {
-  color: var(--text-soft);
-  font-size: 14px;
-  white-space: nowrap;
 }
 
 .shortcut-item.is-capturing .shortcut-input {
@@ -588,6 +584,11 @@ a {
     flex-wrap: wrap;
   }
 
+  .sidebar-logo {
+    width: 32px;
+    height: 32px;
+  }
+
   .settings-main {
     padding: 22px 20px 28px;
   }
@@ -628,13 +629,7 @@ a {
 
   .action-button,
   .shortcut-reset,
-  .shortcut-input,
-  .setting-input {
+  .shortcut-input {
     width: 100%;
-  }
-
-  .setting-inline-input {
-    display: grid;
-    grid-template-columns: 1fr;
   }
 }

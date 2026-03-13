@@ -751,9 +751,9 @@ export class QuickTypeMenu {
 
       .sigtastic-quick-option {
         display: grid;
-        grid-template-columns: 28px minmax(0, 1fr) auto minmax(48px, auto);
+        grid-template-columns: 28px minmax(0, 1fr) auto minmax(30px, auto);
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         width: 100%;
         min-height: 36px;
         padding: 7px 10px;
@@ -812,12 +812,12 @@ export class QuickTypeMenu {
       .sigtastic-quick-shortcut {
         grid-column: 4;
         justify-self: end;
-        min-width: 42px;
+        min-width: 24px;
         font-size: 10px;
         font-weight: 600;
         color: rgba(243, 243, 243, 0.62);
         opacity: 0;
-        transform: translateX(-3px);
+        transform: translateX(-1px);
         transition: opacity 120ms ease, transform 120ms ease;
       }
 

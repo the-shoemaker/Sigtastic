@@ -20,9 +20,6 @@ import {
   type ShortcutPlatform,
 } from "../shared/shortcuts";
 import {
-  AUTO_SAVE_INTERVAL_STEP_MINUTES,
-  AUTO_SAVE_MAX_INTERVAL_MINUTES,
-  AUTO_SAVE_MIN_INTERVAL_MINUTES,
   getDefaultSettings,
   getSettings,
   setSettings,
@@ -53,8 +50,6 @@ type DocsSection = {
 const navLinks = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-view-target]"));
 const viewEls = Array.from(document.querySelectorAll<HTMLElement>("[data-view]"));
 const blurToggle = document.querySelector<HTMLInputElement>("#blur-toggle");
-const autoSaveToggle = document.querySelector<HTMLInputElement>("#auto-save-toggle");
-const autoSaveIntervalInput = document.querySelector<HTMLInputElement>("#auto-save-interval");
 const exportButton = document.querySelector<HTMLButtonElement>("#export-button");
 const importButton = document.querySelector<HTMLButtonElement>("#import-button");
 const importInput = document.querySelector<HTMLInputElement>("#import-input");
@@ -69,8 +64,6 @@ const docsContentEl = document.querySelector<HTMLElement>("#docs-content");
 
 if (
   !blurToggle ||
-  !autoSaveToggle ||
-  !autoSaveIntervalInput ||
   !exportButton ||
   !importButton ||
   !importInput ||
@@ -356,9 +349,6 @@ const parseDocsMarkdown = (markdown: string): DocsSection[] => {
 
 const renderGeneral = (): void => {
   blurToggle.checked = state.settings.appearance.overlayBackdropBlur;
-  autoSaveToggle.checked = state.settings.autoSave.enabled;
-  autoSaveIntervalInput.value = String(state.settings.autoSave.intervalMinutes);
-  autoSaveIntervalInput.disabled = !state.settings.autoSave.enabled;
   favoritesCountEl.textContent = String(state.favoritesCount);
 };
 
@@ -695,29 +685,6 @@ const render = (): void => {
   renderDocs();
 };
 
-const parseAutoSaveIntervalInput = (): number => {
-  const rawValue = autoSaveIntervalInput.value.trim();
-  const parsed = rawValue ? Number(rawValue) : NaN;
-
-  if (!Number.isFinite(parsed)) {
-    throw new Error(
-      `Enter a number between ${AUTO_SAVE_MIN_INTERVAL_MINUTES} and ${AUTO_SAVE_MAX_INTERVAL_MINUTES}.`,
-    );
-  }
-
-  const normalized = Math.round(parsed * 100) / 100;
-  if (
-    normalized < AUTO_SAVE_MIN_INTERVAL_MINUTES ||
-    normalized > AUTO_SAVE_MAX_INTERVAL_MINUTES
-  ) {
-    throw new Error(
-      `Auto-save interval must be between ${AUTO_SAVE_MIN_INTERVAL_MINUTES} and ${AUTO_SAVE_MAX_INTERVAL_MINUTES} minutes.`,
-    );
-  }
-
-  return normalized;
-};
-
 const exportConfigToFile = async (): Promise<void> => {
   const payload = await buildConfigExport();
   const fileName = `sigtastic-config-${new Date().toISOString().slice(0, 10)}.json`;
@@ -759,9 +726,6 @@ const loadDocs = async (): Promise<void> => {
 const init = async (): Promise<void> => {
   const platformInfo = await browser.runtime.getPlatformInfo().catch(() => null);
   state.selectedPlatform = getPlatformFromBrowserOs(platformInfo?.os);
-  autoSaveIntervalInput.min = String(AUTO_SAVE_MIN_INTERVAL_MINUTES);
-  autoSaveIntervalInput.max = String(AUTO_SAVE_MAX_INTERVAL_MINUTES);
-  autoSaveIntervalInput.step = String(AUTO_SAVE_INTERVAL_STEP_MINUTES);
   state.settings = await getSettings();
   state.favoritesCount = (await getFavorites()).length;
   state.activeView = getViewFromHash();
@@ -800,59 +764,6 @@ blurToggle.addEventListener("change", () => {
       setConfigStatus(message, "error");
     });
 });
-
-autoSaveToggle.addEventListener("change", () => {
-  const nextSettings = cloneSettings();
-  nextSettings.autoSave.enabled = autoSaveToggle.checked;
-  void saveSettings(nextSettings)
-    .then(() => {
-      renderGeneral();
-      setConfigStatus(
-        autoSaveToggle.checked
-          ? `Auto save enabled every ${state.settings.autoSave.intervalMinutes} minutes.`
-          : "Auto save disabled.",
-        "success",
-      );
-    })
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      autoSaveToggle.checked = state.settings.autoSave.enabled;
-      renderGeneral();
-      setConfigStatus(message, "error");
-    });
-});
-
-const commitAutoSaveInterval = (): void => {
-  let intervalMinutes: number;
-  try {
-    intervalMinutes = parseAutoSaveIntervalInput();
-  } catch (error) {
-    autoSaveIntervalInput.value = String(state.settings.autoSave.intervalMinutes);
-    setConfigStatus(error instanceof Error ? error.message : String(error), "error");
-    return;
-  }
-
-  if (intervalMinutes === state.settings.autoSave.intervalMinutes) {
-    autoSaveIntervalInput.value = String(state.settings.autoSave.intervalMinutes);
-    return;
-  }
-
-  const nextSettings = cloneSettings();
-  nextSettings.autoSave.intervalMinutes = intervalMinutes;
-  void saveSettings(nextSettings)
-    .then(() => {
-      renderGeneral();
-      setConfigStatus(`Auto save interval set to ${state.settings.autoSave.intervalMinutes} minutes.`, "success");
-    })
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      autoSaveIntervalInput.value = String(state.settings.autoSave.intervalMinutes);
-      setConfigStatus(message, "error");
-    });
-};
-
-autoSaveIntervalInput.addEventListener("change", commitAutoSaveInterval);
-autoSaveIntervalInput.addEventListener("blur", commitAutoSaveInterval);
 
 exportButton.addEventListener("click", () => {
   void exportConfigToFile().catch((error: unknown) => {

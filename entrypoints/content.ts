@@ -45,8 +45,6 @@ let quickMenu: QuickTypeMenu | null = null;
 let quickMenuBootstrapComplete = false;
 let currentPlatform: ShortcutPlatform = "default";
 let currentSettings: SigtasticSettings = getDefaultSettings();
-let autoSaveTimer: number | null = null;
-let autoSaveInFlight = false;
 const recentGlobalShortcutDispatches = new Map<ShortcutActionId, number>();
 
 const pendingClipboardWrites = new Map<
@@ -67,22 +65,6 @@ const pendingEditorRequests = new Map<
   }
 >();
 const lastKnownTaskTypes = new Map<string, TaskTypeOption>();
-
-type SaveModelResult = {
-  ok: boolean;
-  modelId: string;
-  savedAt: number;
-};
-
-const AUTO_SAVE_LOG_PREFIX = "[Sigtastic][AutoSave]";
-
-const autoSaveLog = (...args: unknown[]): void => {
-  console.info(AUTO_SAVE_LOG_PREFIX, ...args);
-};
-
-const autoSaveWarn = (...args: unknown[]): void => {
-  console.warn(AUTO_SAVE_LOG_PREFIX, ...args);
-};
 
 const toast = (() => {
   let node: HTMLDivElement | null = null;
@@ -267,61 +249,9 @@ const onConfiguredShortcutKeyDown = (event: KeyboardEvent): void => {
   }
 };
 
-const clearAutoSaveTimer = (): void => {
-  if (autoSaveTimer !== null) {
-    window.clearInterval(autoSaveTimer);
-    autoSaveTimer = null;
-    autoSaveLog("Cleared timer.");
-  }
-};
-
-const runAutoSave = async (): Promise<void> => {
-  if (autoSaveInFlight || !currentSettings.autoSave.enabled || !isEditorPage()) {
-    return;
-  }
-
-  autoSaveInFlight = true;
-  try {
-    autoSaveLog("Starting save tick.", {
-      intervalMinutes: currentSettings.autoSave.intervalMinutes,
-      url: window.location.href,
-    });
-    const result = await requestModelSave();
-    autoSaveLog("Save tick succeeded.", result);
-    toast("Auto-saved diagram.");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    autoSaveWarn("Save tick failed.", error);
-    toast(`Auto-save failed: ${message.slice(0, 120)}`);
-  } finally {
-    autoSaveInFlight = false;
-  }
-};
-
-const syncAutoSaveTimer = (): void => {
-  clearAutoSaveTimer();
-
-  if (!currentSettings.autoSave.enabled || !isEditorPage()) {
-    autoSaveLog("Timer not scheduled.", {
-      enabled: currentSettings.autoSave.enabled,
-      isEditorPage: isEditorPage(),
-    });
-    return;
-  }
-
-  autoSaveLog("Scheduling timer.", {
-    intervalMinutes: currentSettings.autoSave.intervalMinutes,
-    intervalMs: currentSettings.autoSave.intervalMinutes * 60_000,
-  });
-  autoSaveTimer = window.setInterval(() => {
-    void runAutoSave();
-  }, currentSettings.autoSave.intervalMinutes * 60_000);
-};
-
 const applyUpdatedSettings = (nextSettings: SigtasticSettings): void => {
   currentSettings = nextSettings;
   syncOverlayPreferences();
-  syncAutoSaveTimer();
 };
 
 const detectPlatform = async (): Promise<ShortcutPlatform> => {
@@ -536,28 +466,6 @@ const isEditorSelectionInfo = (value: unknown): value is EditorSelectionInfo => 
   );
 };
 
-const isSaveModelResult = (value: unknown): value is SaveModelResult => {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  return (
-    candidate.ok === true &&
-    typeof candidate.modelId === "string" &&
-    typeof candidate.savedAt === "number"
-  );
-};
-
-const isEditorPage = (): boolean => {
-  try {
-    const url = new URL(window.location.href);
-    return url.pathname === "/p/editor" && Boolean(url.searchParams.get("id")?.trim());
-  } catch {
-    return false;
-  }
-};
-
 const injectClipboardHook = () => {
   if (document.getElementById("sigtastic-clipboard-hook")) {
     return;
@@ -663,7 +571,6 @@ const requestEditorQuery = async (): Promise<EditorSelectionInfo> => {
 
   return result;
 };
-
 const requestTaskTypeApply = async (
   taskType: TaskTypeOption,
   shapeId: string | null,
@@ -726,35 +633,6 @@ const requestQuickMenuBootstrap = async (): Promise<{ ok: boolean; error?: strin
   }
 
   return result as { ok: boolean; error?: string };
-};
-
-const requestModelSave = async (): Promise<SaveModelResult> => {
-  const requestId = createRequestId("editor-action");
-  const result = await new Promise<unknown>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      pendingEditorRequests.delete(requestId);
-      reject(new Error("Timed out waiting for auto-save result"));
-    }, 30000);
-
-    pendingEditorRequests.set(requestId, { resolve, reject, timer });
-    window.postMessage(
-      {
-        source: CLIPBOARD_CONTENT_SOURCE,
-        type: "editor-action-request",
-        requestId,
-        action: "save-model",
-        saveMode: "direct",
-        skipValidation: true,
-      },
-      window.location.origin,
-    );
-  });
-
-  if (!isSaveModelResult(result)) {
-    throw new Error("Save result response was invalid");
-  }
-
-  return result;
 };
 
 const writeFavoriteToClipboard = async (favorite: {
@@ -992,7 +870,6 @@ export default defineContentScript({
   main() {
     injectClipboardHook();
     window.addEventListener("keydown", onConfiguredShortcutKeyDown, true);
-    window.addEventListener("pagehide", clearAutoSaveTimer);
 
     void (async () => {
       currentPlatform = await detectPlatform();

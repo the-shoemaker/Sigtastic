@@ -7,41 +7,13 @@ import {
 } from "./shortcuts";
 
 export const SETTINGS_STORAGE_KEY = "settings";
-export const SETTINGS_VERSION = 2;
-export const AUTO_SAVE_MIN_INTERVAL_MINUTES = 0.1;
-export const AUTO_SAVE_MAX_INTERVAL_MINUTES = 120;
-export const AUTO_SAVE_DEFAULT_INTERVAL_MINUTES = 5;
-export const AUTO_SAVE_INTERVAL_STEP_MINUTES = 0.1;
-
-const clampAutoSaveIntervalMinutes = (value: unknown): number => {
-  const numeric =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value.trim()
-        ? Number(value)
-        : NaN;
-
-  if (!Number.isFinite(numeric)) {
-    return AUTO_SAVE_DEFAULT_INTERVAL_MINUTES;
-  }
-
-  const rounded = Math.round(numeric * 100) / 100;
-
-  return Math.min(
-    AUTO_SAVE_MAX_INTERVAL_MINUTES,
-    Math.max(AUTO_SAVE_MIN_INTERVAL_MINUTES, rounded),
-  );
-};
+export const SETTINGS_VERSION = 1;
 
 export type SigtasticSettings = {
   version: number;
   shortcuts: Record<ShortcutActionId, ShortcutBinding>;
   appearance: {
     overlayBackdropBlur: boolean;
-  };
-  autoSave: {
-    enabled: boolean;
-    intervalMinutes: number;
   };
   quickMenu: {
     numberShortcutModifier: QuickMenuNumberModifier;
@@ -60,10 +32,6 @@ export function getDefaultSettings(): SigtasticSettings {
     shortcuts: getDefaultShortcutBindings(),
     appearance: {
       overlayBackdropBlur: true,
-    },
-    autoSave: {
-      enabled: false,
-      intervalMinutes: AUTO_SAVE_DEFAULT_INTERVAL_MINUTES,
     },
     quickMenu: {
       numberShortcutModifier: "auto",
@@ -89,13 +57,6 @@ export function normalizeSettings(rawValue: unknown): SigtasticSettings {
         typeof candidate.appearance?.overlayBackdropBlur === "boolean"
           ? candidate.appearance.overlayBackdropBlur
           : defaults.appearance.overlayBackdropBlur,
-    },
-    autoSave: {
-      enabled:
-        typeof candidate.autoSave?.enabled === "boolean"
-          ? candidate.autoSave.enabled
-          : defaults.autoSave.enabled,
-      intervalMinutes: clampAutoSaveIntervalMinutes(candidate.autoSave?.intervalMinutes),
     },
     quickMenu: {
       numberShortcutModifier:

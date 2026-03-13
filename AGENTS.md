@@ -42,9 +42,6 @@ This file records odd/tricky implementation details for future agents.
 - Write request strategy:
   - Try raw payload first
   - Retry with sanitized payload on failure
-- Auto save runs from the content script on a timer, but the actual model save happens in page context.
-  - Current implementation serializes the live editor canvas and `PUT`s it to `/p/model/{id}` directly.
-  - This is intended to bypass Signavio's logic-error confirmation flow.
 - Toolbar icon now opens the bundled full-page settings site (`settings.html`), not a popup.
 - Global Signavio shortcuts are now handled by the content script using shared settings state.
   - There is no browser command fallback path anymore.
@@ -59,7 +56,6 @@ This file records odd/tricky implementation details for future agents.
 - Shortcut persistence lives in `src/shared/settings.ts`.
 - All user-customizable data that should survive export/import must round-trip through `src/shared/config-transfer.ts`.
 - If a new customizable feature is added and it is not included in config export/import, that is a bug.
-- Auto-save settings live in shared settings and must keep exporting/importing with the rest of config.
 - The settings page docs are rendered from `public/settings-docs.md`, so add product explanations there instead of hardcoding them into the page layout.
 - Settings UI is view-based (`General`, `Shortcuts`, `Documentation`) via sidebar switching, not a long scrolling one-page layout.
 
